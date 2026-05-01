@@ -111,7 +111,7 @@ graph LR
 
 ## Comparative Analysis
 
-This architecture shifts from explicit history to implicit compression.
+This architecture shifts from explicit history to implicit compression. It builds upon foundational concepts in recurrent sequence modeling (Cho et al., 2014, https://arxiv.org/abs/1406.1078) and more recent developments linking Transformers to RNNs via linear attention (Katharopoulos et al., 2020, https://arxiv.org/abs/2006.16236).
 
 ### Associative Memory vs KV-Attention
 
