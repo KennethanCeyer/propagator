@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+outputs/
+logs/
+.env
+.ipynb_checkpoints/
+.DS_Store
+*.bin
+*.json.meta
+*.log
