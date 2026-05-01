@@ -109,9 +109,11 @@ graph LR
     P4 --> O4["Output 4"]
 ```
 
-### Associative Memory vs KV-Attention
+## Comparative Analysis
 
 This architecture shifts from explicit history to implicit compression.
+
+### Associative Memory vs KV-Attention
 
 | Feature | KV-Attention | Associative Memory |
 | :--- | :--- | :--- |
@@ -341,15 +343,9 @@ I am sorry, as an AI language model, I do not have confirm the capability to acc
 - Turn-Taking: [USER_END] triggers the switch from writing to reading mode.
 - Response: [MODEL] prompts the model to retrieve context and generate a response.
 
-## Installation
+## Setup and Execution
 
-### Prerequisites
-- Linux or macOS
-- NVIDIA GPU with 8GB+ VRAM
-- Python 3.11 or higher
-- CUDA 12.0+ and cuDNN
-
-### Setup
+### Installation
 ```bash
 git clone https://github.com/KennethanCeyer/propagator.git
 cd propagator
@@ -358,8 +354,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
-
-## Usage
 
 ### Background Execution
 ```bash
@@ -387,11 +381,14 @@ python3 train.py --hidden-size 512 --num-layers 8 --batch-size 16 --precision fl
 | --write-rate | float | 0.1 | Speed of matrix updates |
 | --forget-rate | float | 0.02 | Decay rate for old information |
 
-## Use Cases
-- Real-time streaming: Sub-millisecond response times.
-- Edge AI: Deployment on hardware with memory limits.
-- Full-duplex: Simultaneous processing of input and response.
-- Long-term memory: Maintaining state across sessions.
+## Research Application
 
-## Training Architecture
-The model uses Backpropagation Through Time on event-stream datasets. The architecture maintains the memory state across chunks during training to learn dependencies within the fixed-size matrix.
+### Use Cases
+The architecture is suited for environments where traditional Transformer inference faces bottlenecks:
+- Real-time streaming requiring low-latency response times.
+- Edge deployment on hardware with constrained memory.
+- Full-duplex systems involving simultaneous input and generation.
+- Persistent agents maintaining state across extended sessions.
+
+### Training Methodology
+The model utilizes stateful Backpropagation Through Time (BPTT) to evolve the memory matrix M across sequence chunks. This approach enables the learning of long-range dependencies and consistent context management within a fixed-size representation. The training process ensures the associative memory remains stable throughout prolonged interactions.
