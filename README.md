@@ -395,4 +395,4 @@ The model utilizes stateful Backpropagation Through Time (BPTT) to evolve the me
 
 ## License
 
-This project is released under the Propagator Research License. It is available for research and educational purposes only. Commercial use is prohibited. For more details, see the LICENSE file.
+This project is released under the Propagator Research License. It is available for research and educational purposes only. Commercial use is prohibited. For more details, see the [LICENSE](./LICENSE) file.
