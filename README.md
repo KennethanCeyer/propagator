@@ -392,3 +392,7 @@ The architecture is suited for environments where traditional Transformer infere
 
 ### Training Methodology
 The model utilizes stateful Backpropagation Through Time (BPTT) to evolve the memory matrix M across sequence chunks. This approach enables the learning of long-range dependencies and consistent context management within a fixed-size representation. The training process ensures the associative memory remains stable throughout prolonged interactions.
+
+## License
+
+This project is released under the Propagator Research License. It is available for research and educational purposes only. Commercial use is prohibited. For more details, see the LICENSE file.
