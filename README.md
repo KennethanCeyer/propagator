@@ -61,27 +61,23 @@ The weights below are sampling weights used by the training pipeline, not exact 
 | [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | Instruction following and direct response formatting | `dolly_instruction` | 0.03 |
 | [`PolyAI/minds14`](https://huggingface.co/datasets/PolyAI/minds14) (`en-US`) | Short intent-style spoken utterances | `audio_asr` | 0.02 |
 
-### Current Tokenized Size Snapshot
+Current preprocessed cache: `774,087,904` packed training tokens across `24,190,247` chunks (`32` tokens per chunk). Audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training, not the raw codebook-lane total.
 
-The numbers below describe the current local preprocessing cache for the active run. A "protocol position" is one stream step in the packed training sequence; each chunk contains 32 protocol positions. Audio examples can also carry up to eight EnCodec codebook lanes per position, so these counts are not directly comparable to text-only tokenizer counts.
-
-Current materialized total: 24,190,247 chunks, or 774,087,904 protocol positions. This total will increase as the remaining audio sources finish preprocessing.
-
-| Source | Source rows | Cached chunks | Protocol positions | Status |
+| Source | Source rows | Cached chunks | Training tokens | Status |
 | :--- | ---: | ---: | ---: | :--- |
-| [`KurtDu/EchoX-Dialogues-Plus`](https://huggingface.co/datasets/KurtDu/EchoX-Dialogues-Plus) | 177,354 | 3,891,296 | 124,521,472 | Materialized |
-| [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | 312,320 | 8,915,405 | 285,292,960 | Materialized |
-| [`xinrongzhang2022/Duplex-UltraChat`](https://huggingface.co/datasets/xinrongzhang2022/Duplex-UltraChat) | 148,016 | 7,587,138 | 242,788,416 | Materialized |
+| [`KurtDu/EchoX-Dialogues-Plus`](https://huggingface.co/datasets/KurtDu/EchoX-Dialogues-Plus) | `177,354` | `3,891,296` | `124,521,472` | Materialized |
+| [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | `312,320` | `8,915,405` | `285,292,960` | Materialized |
+| [`xinrongzhang2022/Duplex-UltraChat`](https://huggingface.co/datasets/xinrongzhang2022/Duplex-UltraChat) | `148,016` | `7,587,138` | `242,788,416` | Materialized |
 | [`blabble-io/libritts_r`](https://huggingface.co/datasets/blabble-io/libritts_r) | Pending | Pending | Pending | Pending preprocessing |
 | [`facebook/voxpopuli`](https://huggingface.co/datasets/facebook/voxpopuli) | Pending | Pending | Pending | Pending preprocessing |
-| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.clean.360`) | 48,640 | 580,647 | 18,580,704 | In progress |
+| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.clean.360`) | `48,640` | `580,647` | `18,580,704` | In progress |
 | [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.other.500`) | Pending | Pending | Pending | Pending preprocessing |
 | [`edinburghcstr/ami`](https://huggingface.co/datasets/edinburghcstr/ami) | Pending | Pending | Pending | Pending preprocessing |
 | [`distil-whisper/librispeech_asr`](https://huggingface.co/datasets/distil-whisper/librispeech_asr) | Pending | Pending | Pending | Pending preprocessing |
-| [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | 75,387 | 3,095,066 | 99,042,112 | Materialized |
+| [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | `75,387` | `3,095,066` | `99,042,112` | Materialized |
 | [`google/fleurs`](https://huggingface.co/datasets/google/fleurs) (`en_us`) | Pending | Pending | Pending | Pending preprocessing |
-| [`data/propagator_identity.jsonl`](data/propagator_identity.jsonl) | 16,400 | 29,600 | 947,200 | Materialized |
-| [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | 13,509 | 91,095 | 2,915,040 | Materialized |
+| [`data/propagator_identity.jsonl`](data/propagator_identity.jsonl) | `16,400` | `29,600` | `947,200` | Materialized |
+| [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | `13,509` | `91,095` | `2,915,040` | Materialized |
 | [`PolyAI/minds14`](https://huggingface.co/datasets/PolyAI/minds14) (`en-US`) | Pending | Pending | Pending | Pending preprocessing |
 
 ### Supervision Tasks
