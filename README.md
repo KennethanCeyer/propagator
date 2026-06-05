@@ -42,9 +42,9 @@ The run is still a research prototype. Turn-taking and output-mode control are a
 
 The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix_v3.json`. The mix combines public text, instruction, dialogue, ASR, TTS, and paired speech-dialogue datasets with a small local identity set for model-name consistency.
 
-The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current local cache contains `977,638,592` packed training stream steps; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-step count used for training.
+The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current local cache contains `977,638,592` packed training tokens; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training.
 
-| Source | Description | Type | Weight | Training stream steps |
+| Source | Description | Type | Weight | Tokens |
 | :--- | :--- | :--- | ---: | ---: |
 | [`KurtDu/EchoX-Dialogues-Plus`](https://huggingface.co/datasets/KurtDu/EchoX-Dialogues-Plus) (`S2S-QA/AudioQA`) | Paired speech-dialogue turns | Hybrid speech dialogue | 0.18 | `124,521,472` |
 | [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | Educational web text | Text pretraining | 0.15 | `285,292,960` |
