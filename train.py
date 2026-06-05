@@ -491,6 +491,7 @@ class PropagatorConfig(BaseSettings):
     audio_low_rms_threshold: float = 0.005
     audio_token_loss_weight: float = 2.0
     audio_codebook_loss_weight: float = 3.0
+    audio_aux_compact_max_positions: int = 16
     audio_out_loss_weight: float = 8.0
     audio_end_loss_weight: float = 8.0
     output_modality_loss_weight: float = 4.0
@@ -699,6 +700,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-low-rms-threshold", type=float)
     parser.add_argument("--audio-token-loss-weight", type=float)
     parser.add_argument("--audio-codebook-loss-weight", type=float)
+    parser.add_argument("--audio-aux-compact-max-positions", type=int)
     parser.add_argument("--audio-out-loss-weight", type=float)
     parser.add_argument("--audio-end-loss-weight", type=float)
     parser.add_argument("--output-modality-loss-weight", type=float)
@@ -4393,28 +4395,59 @@ class PropagatorModel(nnx.Module):
             audio_codebook_correct = jnp.zeros_like(audio_mask)
 
             if step_target.ndim == 2:
-                aux_logits = self.audio_aux_heads(hidden) # (batch, 7 * audio_codebook_size)
                 batch_sz = hidden.shape[0]
-                aux_logits = aux_logits.reshape((batch_sz, 7, int(self.cfg.audio_codebook_size)))
-
                 aux_targets = step_target[:, 1:8] # (batch, 7)
-                is_audio_aux = jnp.logical_and(aux_targets >= audio_token_start, aux_targets < audio_token_end)
-
                 base_offsets = audio_token_start + jnp.arange(1, 8, dtype=jnp.int32)[None, :] * int(self.cfg.audio_codebook_size)
-                aux_targets_rel = aux_targets - base_offsets
-                aux_targets_rel = jnp.clip(aux_targets_rel, 0, int(self.cfg.audio_codebook_size) - 1)
 
-                aux_log_probs = jax.nn.log_softmax(aux_logits, axis=-1)
-                aux_nll = -jnp.take_along_axis(aux_log_probs, aux_targets_rel[..., None], axis=-1).squeeze(-1)
+                def score_aux(selected_hidden: jax.Array, selected_targets: jax.Array) -> tuple[jax.Array, jax.Array]:
+                    aux_logits = self.audio_aux_heads(selected_hidden)
+                    aux_logits = aux_logits.reshape((selected_hidden.shape[0], 7, int(self.cfg.audio_codebook_size)))
+                    is_audio_aux = jnp.logical_and(selected_targets >= audio_token_start, selected_targets < audio_token_end)
+                    aux_targets_rel = selected_targets - base_offsets
+                    aux_targets_rel = jnp.clip(aux_targets_rel, 0, int(self.cfg.audio_codebook_size) - 1)
 
-                aux_nll_masked = aux_nll * is_audio_aux.astype(jnp.float32)
-                total_aux_nll = jnp.mean(aux_nll_masked, axis=1) * 7.0 # Sum over active heads
+                    aux_log_probs = jax.nn.log_softmax(aux_logits, axis=-1)
+                    aux_nll = -jnp.take_along_axis(aux_log_probs, aux_targets_rel[..., None], axis=-1).squeeze(-1)
+                    aux_nll_masked = aux_nll * is_audio_aux.astype(jnp.float32)
+                    selected_aux_nll = jnp.mean(aux_nll_masked, axis=1) * 7.0 # Sum over active heads
 
-                aux_preds = jnp.argmax(aux_logits, axis=-1).astype(jnp.int32)
-                aux_correct = jnp.logical_and(is_audio_aux, aux_preds == aux_targets_rel)
-                # Count correct if all active aux heads are correct
-                audio_codebook_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1) == 7.0
-                audio_codebook_correct = jnp.logical_and(audio_mask, audio_codebook_correct)
+                    aux_preds = jnp.argmax(aux_logits, axis=-1).astype(jnp.int32)
+                    aux_correct = jnp.logical_and(is_audio_aux, aux_preds == aux_targets_rel)
+                    selected_codebook_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1) == 7.0
+                    return selected_aux_nll, selected_codebook_correct
+
+                def score_aux_full(_: None) -> tuple[jax.Array, jax.Array]:
+                    full_aux_nll, full_codebook_correct = score_aux(hidden, aux_targets)
+                    full_codebook_correct = jnp.logical_and(audio_mask, full_codebook_correct)
+                    return full_aux_nll, full_codebook_correct
+
+                compact_k = min(max(1, int(self.cfg.audio_aux_compact_max_positions)), int(batch_sz))
+
+                def score_aux_compact(audio_count: jax.Array) -> tuple[jax.Array, jax.Array]:
+                    selected_idx = jnp.nonzero(audio_mask, size=compact_k, fill_value=0)[0]
+                    selected_hidden = hidden[selected_idx]
+                    selected_targets = aux_targets[selected_idx]
+                    selected_aux_nll, selected_codebook_correct = score_aux(selected_hidden, selected_targets)
+                    selected_valid = jnp.arange(compact_k, dtype=jnp.int32) < audio_count
+                    selected_aux_nll = selected_aux_nll * selected_valid.astype(jnp.float32)
+                    selected_codebook_correct = jnp.logical_and(selected_codebook_correct, selected_valid)
+
+                    compact_aux_nll = jnp.zeros((batch_sz,), dtype=jnp.float32).at[selected_idx].add(selected_aux_nll)
+                    compact_codebook_correct_f = jnp.zeros((batch_sz,), dtype=jnp.float32).at[selected_idx].add(
+                        selected_codebook_correct.astype(jnp.float32)
+                    )
+                    return compact_aux_nll, compact_codebook_correct_f > 0.0
+
+                audio_count = jnp.sum(audio_mask.astype(jnp.int32))
+                if compact_k < int(batch_sz):
+                    total_aux_nll, audio_codebook_correct = jax.lax.cond(
+                        audio_count <= compact_k,
+                        score_aux_compact,
+                        score_aux_full,
+                        audio_count,
+                    )
+                else:
+                    total_aux_nll, audio_codebook_correct = score_aux_full(None)
 
             metrics = (
                 jnp.sum(jnp.logical_and(correct, decision_mask).astype(jnp.float32)),
