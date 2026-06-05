@@ -150,7 +150,7 @@ TRAIN_ARGS=(
     --local-checkpoint-keep "$LOCAL_CHECKPOINT_KEEP"
     --gcs-sync-every "$GCS_SYNC_EVERY"
     --gcs-backup-keep "$GCS_BACKUP_KEEP"
-    --auto-batch-max-per-device "${AUTO_BATCH_MAX_PER_DEVICE:-8}"
+    --auto-batch-max-per-device "${AUTO_BATCH_MAX_PER_DEVICE:-16}"
     --auto-batch-multiple-per-device "${AUTO_BATCH_MULTIPLE_PER_DEVICE:-8}"
     --auto-batch-memory-util "${AUTO_BATCH_MEMORY_UTIL:-0.78}"
     --epochs "${EPOCHS:-30}"

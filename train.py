@@ -521,7 +521,7 @@ class PropagatorConfig(BaseSettings):
     data_axis_name: str = "data"
     auto_batch_hbm_gb: float = 0.0
     auto_batch_memory_util: float = 0.78
-    auto_batch_max_per_device: int = 8
+    auto_batch_max_per_device: int = 16
     auto_batch_multiple_per_device: int = 8
 
     edge_vram_mb: int = 2048
