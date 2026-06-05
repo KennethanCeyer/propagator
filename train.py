@@ -5730,17 +5730,17 @@ def configure_runtime_environment() -> None:
 
 
 def maybe_put_batch(array: np.ndarray, dtype: Any) -> jax.Array:
-    value = jnp.asarray(np.asarray(array, dtype=dtype))
+    value = np.asarray(array, dtype=dtype)
     if batch_sharding is not None:
         return jax.device_put(value, batch_sharding)
-    return value
+    return jnp.asarray(value)
 
 
 def maybe_put_vector(array: np.ndarray, dtype: Any) -> jax.Array:
-    value = jnp.asarray(np.asarray(array, dtype=dtype))
+    value = np.asarray(array, dtype=dtype)
     if vector_sharding is not None:
         return jax.device_put(value, vector_sharding)
-    return value
+    return jnp.asarray(value)
 
 
 def maybe_shard_memories(memories: tuple[jax.Array, ...]) -> tuple[jax.Array, ...]:
@@ -6169,6 +6169,7 @@ def main() -> None:
     checkpointer = ocp.StandardCheckpointer()
 
     start_step = 0
+    train_loss_steps: list[int] = []
     train_losses: list[float] = []
     val_steps: list[int] = []
     val_losses: list[float] = []
@@ -6211,6 +6212,7 @@ def main() -> None:
                             except Exception:
                                 continue
                     for s in sorted(train_by_step):
+                        train_loss_steps.append(s)
                         train_losses.append(train_by_step[s])
                     for s in sorted(val_by_step):
                         v_loss, m = val_by_step[s]
@@ -6275,10 +6277,17 @@ def main() -> None:
             batch_inputs, batch_targets, batch_weights = get_random_batch(step, shuffled)
             ce_loss_val = train_step_stateless(model, optimizer, batch_inputs, batch_targets, batch_weights)
 
-        train_losses.append(float(ce_loss_val))
-        pbar.set_postfix({"loss": f"{train_losses[-1]:.4f}"})
-
         act_step = step + 1
+        should_record_train_loss = (
+            (config.train_log_every > 0 and act_step % config.train_log_every == 0)
+            or (config.eval_every > 0 and act_step % config.eval_every == 0)
+            or act_step == total_steps
+        )
+        if should_record_train_loss:
+            latest_train_loss = float(ce_loss_val)
+            train_loss_steps.append(act_step)
+            train_losses.append(latest_train_loss)
+            pbar.set_postfix({"loss": f"{latest_train_loss:.4f}"})
 
         if config.train_log_every > 0 and act_step % config.train_log_every == 0:
             now = time.time()
@@ -6290,8 +6299,9 @@ def main() -> None:
             interval_sps = interval_steps / interval_elapsed
             remaining_steps = max(0, total_steps - act_step)
             eta_seconds = remaining_steps / max(1e-6, interval_sps)
+            latest_train_loss = train_losses[-1] if train_losses else float("nan")
             log_info(
-                f"[Train] step={act_step}/{total_steps}, loss={train_losses[-1]:.4f}, "
+                f"[Train] step={act_step}/{total_steps}, loss={latest_train_loss:.4f}, "
                 f"steps_per_sec={avg_sps:.4f}, interval_steps_per_sec={interval_sps:.4f}, "
                 f"elapsed={format_duration(elapsed)}, eta={format_duration(eta_seconds)}"
             )
@@ -6316,7 +6326,7 @@ def main() -> None:
             out_dir = output_root / f"step_{act_step}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            save_metric_plot(list(range(1, act_step + 1)), train_losses, out_dir / "train_loss.png", "Train weighted CE", act_step)
+            save_metric_plot(train_loss_steps, train_losses, out_dir / "train_loss.png", "Train weighted CE", act_step)
             save_metric_plot(val_steps, val_losses, out_dir / "val_loss.png", "Validation weighted CE", act_step)
             save_metric_plot(val_steps, val_decision_accs, out_dir / "val_decision_acc.png", "Validation decision accuracy", act_step)
             save_metric_plot(val_steps, val_user_end_accs, out_dir / "val_user_end_acc.png", "Validation user_end accuracy", act_step)
@@ -6354,7 +6364,7 @@ def main() -> None:
                 output_root,
                 {
                     "step": act_step,
-                    "train_loss": train_losses[-1],
+                    "train_loss": train_losses[-1] if train_losses else float("nan"),
                     "val_loss": v_loss,
                     "metrics": v_metrics,
                     "text_eval": text_meta,
