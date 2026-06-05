@@ -14,6 +14,13 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 cd "$PROJECT_ROOT"
 
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+fi
+
 mkdir -p logs
 
 CPU_COUNT="$(python3 - <<'PY'
@@ -60,10 +67,27 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-10000}"
 GCS_SYNC_EVERY="${GCS_SYNC_EVERY:-20000}"
 GCS_BACKUP_KEEP="${GCS_BACKUP_KEEP:-5}"
 DATASET_MIX_FILE="${DATASET_MIX_FILE:-data/propagator_dataset_mix_v3.json}"
-if [[ -z "${CACHE_ROOT:-}" && -d /dev/shm && -w /dev/shm ]]; then
+PROPAGATOR_DISK_ROOT="${PROPAGATOR_DISK_ROOT:-/mnt/disks/propagator-cache}"
+if [[ -z "${CACHE_ROOT:-}" && -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
+    CACHE_ROOT="$PROPAGATOR_DISK_ROOT/cache"
+elif [[ -z "${CACHE_ROOT:-}" && -d /dev/shm && -w /dev/shm ]]; then
     CACHE_ROOT="/dev/shm/propagator-cache"
 else
     CACHE_ROOT="${CACHE_ROOT:-outputs/cache}"
+fi
+if [[ -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
+    export CACHE_STORAGE="${CACHE_STORAGE:-disk}"
+    export CACHE_READ_MODE="${CACHE_READ_MODE:-mmap}"
+    export HF_HOME="${HF_HOME:-$PROPAGATOR_DISK_ROOT/hf}"
+    export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+    export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/transformers}"
+    export TMPDIR="${TMPDIR:-$PROPAGATOR_DISK_ROOT/tmp}"
+    mkdir -p "$CACHE_ROOT" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE" "$TMPDIR"
+fi
+DEFAULT_OUTPUT_ROOT="outputs/propagator-multimodal-v2"
+if [[ -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
+    DEFAULT_OUTPUT_ROOT="$PROPAGATOR_DISK_ROOT/outputs/propagator-multimodal-v2"
+    mkdir -p "$(dirname "$DEFAULT_OUTPUT_ROOT")"
 fi
 ECHOX_CACHE_RAW_SHARDS="${ECHOX_CACHE_RAW_SHARDS:-auto}"
 ECHOX_RAW_CACHE_MIN_FREE_GB="${ECHOX_RAW_CACHE_MIN_FREE_GB:-96}"
@@ -87,7 +111,7 @@ TRAIN_ARGS=(
     --memory-value-size "${MEMORY_VALUE_SIZE:-768}"
     --train-unroll-len "${TRAIN_UNROLL_LEN:-32}"
     --batch-size "${BATCH_SIZE:-0}"
-    --output-root "${OUTPUT_ROOT:-outputs/propagator-multimodal-v2}"
+    --output-root "${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
     --tokenizer-vocab-size 16000
     --tokenizer-train-rows "${TOKENIZER_TRAIN_ROWS:-200000}"
     --max-train-chunks "${MAX_TRAIN_CHUNKS:-0}"
@@ -145,7 +169,7 @@ fi
 
 case "${ECHOX_CACHE_RAW_SHARDS,,}" in
     auto)
-        if [[ "$CACHE_ROOT" == /dev/shm/* ]]; then
+        if [[ "$CACHE_ROOT" == /dev/shm/* || "$CACHE_ROOT" == "$PROPAGATOR_DISK_ROOT"/* ]]; then
             TRAIN_ARGS+=(
                 --echox-cache-raw-shards
                 --echox-raw-cache-dir "$CACHE_ROOT/echox_raw_shards"

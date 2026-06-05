@@ -42,24 +42,24 @@ The run is still a research prototype. Turn-taking and output-mode control are a
 
 The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix_v3.json`. The mix combines public text, instruction, dialogue, ASR, TTS, and paired speech-dialogue datasets with a small local identity set for model-name consistency.
 
-The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current local cache contains `774,087,904` packed training tokens; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training.
+The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current local cache contains `977,638,592` packed training stream steps; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-step count used for training.
 
-| Source | Description | Type | Weight | Training tokens |
+| Source | Description | Type | Weight | Training stream steps |
 | :--- | :--- | :--- | ---: | ---: |
 | [`KurtDu/EchoX-Dialogues-Plus`](https://huggingface.co/datasets/KurtDu/EchoX-Dialogues-Plus) (`S2S-QA/AudioQA`) | Paired speech-dialogue turns | Hybrid speech dialogue | 0.18 | `124,521,472` |
 | [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | Educational web text | Text pretraining | 0.15 | `285,292,960` |
 | [`xinrongzhang2022/Duplex-UltraChat`](https://huggingface.co/datasets/xinrongzhang2022/Duplex-UltraChat) | Text dialogue and turn-taking | Text dialogue | 0.10 | `242,788,416` |
-| [`blabble-io/libritts_r`](https://huggingface.co/datasets/blabble-io/libritts_r) | Clean read speech | TTS / ASR | 0.08 | - |
-| [`facebook/voxpopuli`](https://huggingface.co/datasets/facebook/voxpopuli) | Real-world spoken transcripts | ASR | 0.07 | - |
-| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.clean.360`) | Clean audiobook speech | ASR / TTS | 0.06 | `18,580,704` |
-| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.other.500`) | Noisier audiobook speech | ASR / TTS | 0.06 | - |
-| [`edinburghcstr/ami`](https://huggingface.co/datasets/edinburghcstr/ami) | Meeting speech | ASR | 0.06 | - |
-| [`distil-whisper/librispeech_asr`](https://huggingface.co/datasets/distil-whisper/librispeech_asr) | LibriSpeech-derived speech | ASR / TTS | 0.06 | - |
+| [`blabble-io/libritts_r`](https://huggingface.co/datasets/blabble-io/libritts_r) | Clean read speech | TTS / ASR | 0.08 | `34,143,712` |
+| [`facebook/voxpopuli`](https://huggingface.co/datasets/facebook/voxpopuli) | Real-world spoken transcripts | ASR | 0.07 | `62,663,712` |
+| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.clean.360`) | Clean audiobook speech | ASR / TTS | 0.06 | `37,259,904` |
+| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.other.500`) | Noisier audiobook speech | ASR / TTS | 0.06 | `55,950,016` |
+| [`edinburghcstr/ami`](https://huggingface.co/datasets/edinburghcstr/ami) | Meeting speech | ASR | 0.06 | `20,093,024` |
+| [`distil-whisper/librispeech_asr`](https://huggingface.co/datasets/distil-whisper/librispeech_asr) | LibriSpeech-derived speech | ASR / TTS | 0.06 | `10,938,176` |
 | [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | Encyclopedic text | Text pretraining | 0.05 | `99,042,112` |
-| [`google/fleurs`](https://huggingface.co/datasets/google/fleurs) (`en_us`) | Multispeaker English speech | ASR / TTS | 0.04 | - |
+| [`google/fleurs`](https://huggingface.co/datasets/google/fleurs) (`en_us`) | Multispeaker English speech | ASR / TTS | 0.04 | `916,064` |
 | [`data/propagator_identity.jsonl`](data/propagator_identity.jsonl) | Propagator identity examples | Text dialogue | 0.04 | `947,200` |
 | [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | Instruction-response examples | Instruction tuning | 0.03 | `2,915,040` |
-| [`PolyAI/minds14`](https://huggingface.co/datasets/PolyAI/minds14) (`en-US`) | Short intent utterances | ASR | 0.02 | - |
+| [`PolyAI/minds14`](https://huggingface.co/datasets/PolyAI/minds14) (`en-US`) | Short intent utterances | ASR | 0.02 | `166,784` |
 
 ### Supervision Tasks
 

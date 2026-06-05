@@ -216,7 +216,7 @@ def configure_logging() -> None:
     if is_main_process and env_flag("SLACK_LOG_ENABLED", False):
         slack_handler = SlackLogMirror()
         if slack_handler.enabled:
-            slack_handler.setFormatter(logging.Formatter("%(message)s"))
+            slack_handler.setFormatter(UtcFormatter("[%(asctime)sZ] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"))
             LOGGER.addHandler(slack_handler)
 
 
@@ -3759,7 +3759,7 @@ def tokenize_dataset_rows(
         pbar.close()
         pool_completed = True
     finally:
-        if pool_completed:
+        if pool_completed and not stop_early:
             pool.close()
         else:
             pool.terminate()
@@ -3828,6 +3828,13 @@ def load_cache_or_tokenize(
         log_info(f"Loading cached {split_name} chunks: chunks={num_rows}, path={cp}")
 
         return open_tokenized_cache(cp, num_rows, unroll_len)
+
+    if split_name == "train" and max_chunks <= 0:
+        raise RuntimeError(
+            f"Training cache is missing at {cp}.meta.json and max_train_chunks=0 would infer a "
+            "storage-capacity-based cap. Refusing to build a new capped training cache implicitly; "
+            "restore the current run cache or set MAX_TRAIN_CHUNKS deliberately for a new run."
+        )
 
     specs = parse_dataset_mix()
     if len(specs) > 1 or (config.dataset_mix or "").strip():
