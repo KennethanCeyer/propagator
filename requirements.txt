@@ -1,0 +1,15 @@
+jax[tpu]>=0.4.34
+flax>=0.10.0
+optax>=0.2.3
+orbax-checkpoint>=0.7.0
+numpy>=1.26
+matplotlib>=3.8
+datasets[audio]>=2.20,<3.0
+tokenizers>=0.19
+tqdm>=4.66
+python-dotenv>=1.0
+pydantic-settings>=2.4
+soundfile>=0.12
+torch>=2.3
+torchaudio>=2.3
+encodec>=0.1.1

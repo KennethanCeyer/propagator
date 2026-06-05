@@ -1,14 +1,39 @@
 <h1 align="center">Propagator</h1>
 
 <p align="center">
+  <img src="assets/logo.png" alt="Propagator logo" width="360" />
+</p>
+
+<p align="center">
   <a href="https://github.com/KennethanCeyer/propagator/stargazers"><img src="https://img.shields.io/github/stars/KennethanCeyer/propagator?style=flat&color=yellow&logo=github" alt="stars" /></a>
   <a href="https://github.com/KennethanCeyer/propagator/network/members"><img src="https://img.shields.io/github/forks/KennethanCeyer/propagator?style=flat&color=lightblue&logo=github" alt="forks" /></a>
   <a href="https://github.com/KennethanCeyer/propagator/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Research--Only-orange" alt="license" /></a>
   <a href="https://jax.readthedocs.io/"><img src="https://img.shields.io/badge/JAX-Powered-blue?style=flat&logo=google" alt="jax" /></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white" alt="python" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white" alt="python" /></a>
 </p>
 
-Propagator is a JAX-based language model architecture using a persistent, fixed-size matrix for memory. Transformer models store a growing history of keys and values in a KV cache. Propagator compresses this data into a static mathematical structure during each forward pass. This design maintains constant-time complexity per step and a static memory footprint by avoiding linear scaling.
+Propagator is a JAX-based streaming language and speech model architecture using a persistent, fixed-size matrix for memory. Transformer models store a growing history of keys and values in a KV cache. Propagator compresses this data into a static recurrent matrix state during each forward pass. This gives inference a constant-size memory state per layer instead of a token-length KV cache, at the cost of lossy compression.
+
+The current experimental run is a multimodal duplex model trained on text dialogue, instruction data, ASR rows, TTS rows, audio reconstruction, and hybrid speech-dialogue supervision. It uses a byte-level BPE tokenizer with protocol tokens, EnCodec audio tokens, stateful chunk sampling, and weighted losses for content, control, modality, and audio-codebook targets.
+
+## Current Snapshot
+
+Latest completed evaluation: step 55,000 from `outputs/propagator-multimodal-v2`.
+
+| Item | Value |
+| :--- | :--- |
+| Parameters | 586.5M |
+| Layers | 24 matrix-memory blocks |
+| Hidden size | 1536 |
+| Memory per layer | 384 keys x 768 values |
+| Training unroll | 32 stream steps |
+| Effective batch | 64, sharded across 4 JAX devices |
+| Tokenizer | 16k byte-level BPE plus protocol/audio tokens |
+| Audio codec | EnCodec, 24 kHz, 8 codebooks x 1024 codes |
+| Precision | bfloat16 training |
+| Optimizer | AdamW, peak LR 3e-4 |
+
+The run is still a research prototype. Turn-taking and output-mode control are already learnable, but generated language quality is uneven and exact audio-codebook accuracy remains low.
 
 ## Model Architecture and Theory
 
@@ -117,7 +142,7 @@ This architecture shifts from explicit history to implicit compression. It build
 
 | Feature | KV-Attention | Associative Memory |
 | :--- | :--- | :--- |
-| Memory Structure | Growing list of vectors | Persistent square matrix |
+| Memory Structure | Growing list of vectors | Persistent fixed-size matrix |
 | Information Density | Low (token-specific space) | High (superimposed outer products) |
 | Retrieval | Softmax lookup over all keys | Linear projection |
 | Context Scaling | Linear growth | Constant cost per step |
@@ -133,7 +158,7 @@ Propagator uses a recurrent flow but avoids the vector bottleneck found in LSTMs
 | Memory Capacity | Vector-limited | High-capacity matrix storage |
 | Update Rule | Gated vector updates | Error-correcting delta rule |
 | Recall | Weak for long sequences | Targeted recall via keys |
-| Training | Sequential | Parallelizable via linear form |
+| Training | Sequential | Stateful truncated BPTT over stream chunks |
 
 Traditional RNNs squash all information into a single vector. Propagator uses a matrix state to store associations without destroying previous data.
 
@@ -148,10 +173,21 @@ The architecture handles incoming user speech while managing the response state 
 | [SESSION] | Reset | Clears matrices to start a new session |
 | [USER] | User start | Switches to listening mode to store data |
 | [LISTEN] | Silence target | Suppresses output during training |
+| [SILENCE] | Explicit silence input | Represents a silent user chunk |
 | [USER_END] | User finished | Signals that the user finished their turn |
 | [MODEL] | Model start | Switches to response mode for retrieval |
 | [USER_INTERRUPT] | Interruption | Handles user speech during model response |
 | [MODEL_END] | Model finished | Signals the end of the response |
+| [TEXT_IN] | Text input segment | Marks text supplied by the user |
+| [AUDIO_IN] | Audio input segment | Marks codec-token audio supplied by the user |
+| [TEXT_OUT] | Text output mode | Declares that the model response is text |
+| [AUDIO_OUT] | Audio output mode | Declares that the model response is audio codec tokens |
+| [AUDIO_END] | Audio output end | Terminates an audio segment |
+| [HYBRID_OUT] | Hybrid output mode | Declares a response containing text and audio |
+
+The multimodal training protocol covers four stream directions: Text->Text for dialogue and instruction data, Audio->Text for ASR-style rows, Text->Audio for TTS-style rows, and Audio->Audio for speech reconstruction/continuation. Hybrid rows use [HYBRID_OUT] followed by text content and an [AUDIO_OUT] audio segment. The default mix also includes EchoX paired speech-dialogue rows, where user speech is paired with assistant text and synthesized assistant speech for Audio->Hybrid response supervision.
+
+Dataset preprocessing is intentionally source-aware. EchoX rows are treated as speech-to-speech dialogue supervision; Duplex-UltraChat rows are text turn-taking and idle/interruption protocol supervision; AMI, LibriSpeech, FLEURS, MINDS-14, and VoxPopuli rows are ASR-oriented speech understanding data; LibriTTS-R rows are studio/read-speech data weighted toward TTS. This prevents clean read-speech corpora from being overused as fake full-duplex response data.
 
 ### Sequence Diagram
 
@@ -188,160 +224,108 @@ sequenceDiagram
 
 ## Performance Evaluation
 
-Evaluation metrics on the Duplex-UltraChat dataset.
+Evaluation currently uses a held-out validation stream built from each source's validation split when available. For sources that only expose a train split, rows are partitioned with `idx % 10 == 0` for validation.
+
+The reported CE is a weighted multimodal objective, not a plain text perplexity. It includes text/content targets, turn-taking/control targets, output modality tokens, audio tokens, and auxiliary audio-codebook losses. Training loss is logged from the current training batch, while validation loss is averaged over 16 validation batches.
 
 ### Loss and Convergence
 
-| Training Loss | Validation Loss |
+| Training Weighted CE | Validation Weighted CE |
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Training loss tracks error across content and control tasks. Validation loss shows the ability to handle new dialogue streams.
+Latest completed eval at step 55,000:
 
-### Protocol Adherence
+| Metric | Value |
+| :--- | ---: |
+| Train weighted CE | 53.15 |
+| Validation weighted CE | 68.79 |
+| Best validation weighted CE so far | 65.84 at step 50,000 |
+| Decision accuracy | 94.51% |
+| Listen accuracy | 94.68% |
+| User-end accuracy | 72.66% |
+| Model-end accuracy | 72.73% |
+| Text token accuracy | 31.82% |
+| Audio token accuracy | 37.25% |
+| Audio codebook exact accuracy | 2.15% |
+
+### Protocol and Modality
 
 | Decision Accuracy | User-End Detection |
 | :---: | :---: |
 | ![Decision Accuracy](assets/val_decision_acc.png) | ![User-End Accuracy](assets/val_user_end_acc.png) |
 
-Decision accuracy tracks protocol state predictions. User-end accuracy measures the detection of pauses in user speech.
+| Text Token Accuracy | Audio Token Accuracy |
+| :---: | :---: |
+| ![Text Token Accuracy](assets/val_text_token_acc.png) | ![Audio Token Accuracy](assets/val_audio_token_acc.png) |
 
-### Performance Indicators
-- Decision Accuracy: 95.4%
-- Listen Accuracy: 95.3%
-- Turn-Taking Precision: 98.8%
+| ASR Task Accuracy | TTS Task Accuracy |
+| :---: | :---: |
+| ![ASR Task Accuracy](assets/val_asr_task_acc.png) | ![TTS Task Accuracy](assets/val_tts_task_acc.png) |
+
+| Duplex Task Accuracy | Audio Codebook Exact Accuracy |
+| :---: | :---: |
+| ![Duplex Task Accuracy](assets/val_duplex_task_acc.png) | ![Audio Codebook Accuracy](assets/val_audio_codebook_acc.png) |
 
 ## Output Examples
 
-### Protocol Flow
-Trace showing the transition from listening to generating.
+These examples are from the step 55,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
+
+### Identity Prompt
 
 ```text
 ## user stream
 [SESSION] -> [LISTEN]
 [USER] -> [LISTEN]
-"Hello" -> [LISTEN]
-"could you" -> [LISTEN]
-"tell me" -> [LISTEN]
-"what" -> [LISTEN]
-"your name" -> [LISTEN]
-"is?" -> [USER_END]
+"What" -> [LISTEN]
+"is your name?" -> [USER_END]
 
 ## model stream
 [USER_END] -> [MODEL]
-[MODEL] -> I
-I ->  am
- am ->  sor
- sor -> ry
-ry -> ,
-, ->  as
- as ->  an
- an ->  AI
- AI ->  language
- language ->  model
- model -> ,
-, ->  I
- I ->  do
- do ->  not
- not ->  have
- have ->  conf
- conf -> irm
-irm ->  the
- the ->  cap
- cap -> ability
-ability ->  to
- to ->  access
- access ->  or
- or ->  provide
- provide ->  specific
- specific ->  l
- l -> inks
-inks -> .
-. ->  However
- However -> ,
-, ->  you
- you ->  can
- can ->  search
- search ->  for
- for ->  "
- " -> He
-He -> art
-art -> y
-y -> "
-" ->  or
- or ->  "
- " -> C
-C -> reate
-reate ->  a
- a ->  language
- language -> "
-" ->  in
- in ->  your
- your ->  search
- search ->  for
- for ->  "
- " -> Pro
-Pro -> f
-f -> ess
-ess -> ional
-ional -> "
-" ->  or
- or ->  "
- " -> M
-M -> y
-y ->  T
- T -> itle
-itle -> "
-" ->  or
- or ->  "
- " -> M
-M -> y
-y ->  T
- T -> itle
-itle -> "
-" ->  for
- for ->  a
- a ->  unique
- unique ->  way
- way ->  to
- to ->  share
- share ->  with
- with ->  them
- them -> .
-. ->  Additionally
- Additionally -> ,
-, ->  you
- you ->  can
- can ->  use
- use ->  this
- name ->  to
- to ->  create
- create ->  a
- a ->  new
- new ->  t
- t -> one
-one ->  that
- that ->  you
- you ->  are
- are ->  trying
- trying ->  to
- to ->  create
- create ->  your
- your ->  text
- text -> .
+[MODEL] -> [TEXT_OUT]
+[TEXT_OUT] -> P
+P -> rop
+rop -> ag
+ag -> ator
+ator -> .
 . -> [MODEL_END]
 ```
 
-### Model Output
+### Silence / Turn Boundary
+
 ```text
-I am sorry, as an AI language model, I do not have confirm the capability to access or provide specific links. However, you can search for "Hearty" or "Create a language" in your search for "Professional" or "My Title" or "My Title" for a unique way to share with them. Additionally, you can use this name to create a new tone that you are trying to create your text.
+## user stream
+[SESSION] -> [LISTEN]
+[USER] -> [LISTEN]
+"I am going to pause" -> [LISTEN]
+"[SILENCE]" -> [USER_END]
+
+## model stream
+[USER_END] -> [MODEL]
+[MODEL] -> [TEXT_OUT]
+```
+
+### Interruption-Like Input
+
+```text
+## user stream
+[SESSION] -> [LISTEN]
+[USER] -> [LISTEN]
+"Actually wait" -> [LISTEN]
+"stop" -> [LISTEN]
+"new question" -> [LISTEN]
+
+## model stream
+not started because runtime policy did not receive [USER_END].
 ```
 
 ### Interpretation
-- Session Management: [SESSION] initializes the memory matrix for each interaction.
-- Listening: Model targets [LISTEN] during user input to update the matrix without output.
-- Turn-Taking: [USER_END] triggers the switch from writing to reading mode.
-- Response: [MODEL] prompts the model to retrieve context and generate a response.
+
+- Session management: `[SESSION]` initializes the memory matrix for each interaction.
+- Listening: the model targets `[LISTEN]` during user input to update the matrix without output.
+- Turn-taking: `[USER_END]` triggers the switch from writing/listening to response mode.
+- Response mode: `[MODEL]` is followed by `[TEXT_OUT]`, `[AUDIO_OUT]`, or `[HYBRID_OUT]`.
+- Current limitation: control tokens are learning faster than high-quality long-form generation.
 
 ## Setup and Execution
 
@@ -355,31 +339,44 @@ pip install -r requirements.txt
 pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
 
-### Background Execution
+### Background Training
 ```bash
 bash scripts/train.sh
 ```
 
-### Direct Execution
+The training script starts a detached process, writes the PID to `logs/train.pid`, and updates `logs/train.latest.log`.
+
 ```bash
-python3 train.py --hidden-size 512 --num-layers 8 --batch-size 16 --precision float16
+tail -f logs/train.latest.log
 ```
 
-### Arguments
+Run in the foreground:
 
-| Argument | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| --hidden-size | int | 512 | Model hidden dimension |
-| --num-layers | int | 8 | Number of Matrix Memory layers |
-| --memory-key-size | int | 128 | Dimension of memory keys |
-| --memory-value-size | int | 256 | Dimension of memory values |
-| --batch-size | int | 8 | Training batch size |
-| --learning-rate | float | 3e-4 | Peak learning rate |
-| --precision | str | float16 | Floating point precision |
-| --dataset-mode | str | duplex_chat | Dialogue protocol mode |
-| --streaming | flag | True | Use streaming datasets |
-| --write-rate | float | 0.1 | Speed of matrix updates |
-| --forget-rate | float | 0.02 | Decay rate for old information |
+```bash
+bash scripts/train.sh --foreground
+```
+
+### Current Training Defaults
+
+The checked-in script configures the active multimodal run:
+
+| Setting | Default |
+| :--- | :--- |
+| Model | 24 layers, hidden 1536, memory 384 x 768 |
+| Batch | auto-batched, max 16 examples per device |
+| Precision | bfloat16 |
+| Optimizer | AdamW with grad clipping |
+| Tokenizer | 16k byte-level BPE |
+| Audio | EnCodec, 24 kHz, 8 codebooks |
+| Eval cadence | every 5,000 steps |
+| Checkpoint cadence | every 10,000 steps |
+| GCS cadence | every 20,000 steps when `GCS_BACKUP_DIR` is set |
+
+Most settings can be overridden through environment variables before launching:
+
+```bash
+HIDDEN_SIZE=768 NUM_LAYERS=12 BATCH_SIZE=16 bash scripts/train.sh --foreground
+```
 
 ## Research Application
 
@@ -391,7 +388,7 @@ The architecture is suited for environments where traditional Transformer infere
 - Persistent agents maintaining state across extended sessions.
 
 ### Training Methodology
-The model utilizes stateful Backpropagation Through Time (BPTT) to evolve the memory matrix M across sequence chunks. This approach enables the learning of long-range dependencies and consistent context management within a fixed-size representation. The training process ensures the associative memory remains stable throughout prolonged interactions.
+The model uses stateful truncated Backpropagation Through Time (BPTT) to evolve the memory matrix M across sequence chunks. This lets the model learn streaming dependencies while preserving a fixed-size recurrent state. Stability and recall quality are active research questions because the matrix is a compressed, lossy memory rather than a lossless transcript.
 
 ## License
 

@@ -1,0 +1,4 @@
+{"output":[{"role":"user","content":"hello are you listening"},{"role":"assistant","content":"yes i am listening"},{"role":"user","content":"say a short answer"},{"role":"assistant","content":"short answer"}]}
+{"output":[{"role":"user","content":"what is your name"},{"role":"assistant","content":"i am propagator"},{"role":"user","content":"thanks"},{"role":"assistant","content":"you are welcome"}]}
+{"output":[{"role":"user","content":"please wait for me"},{"role":"assistant","content":"i will keep listening"}]}
+{"output":[{"role":"user","content":"turn taking matters"},{"role":"assistant","content":"i respond after user end"}]}
