@@ -12,6 +12,9 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white" alt="python" /></a>
 </p>
 
+> [!NOTE]
+> This project documents an active research run. Training is still in progress, so the final evaluation results, examples, and demos may change and will be updated after training completes.
+
 Propagator is a JAX-based streaming language and speech model architecture using a persistent, fixed-size matrix for memory. Transformer models store a growing history of keys and values in a KV cache. Propagator compresses this data into a static recurrent matrix state during each forward pass. This gives inference a constant-size memory state per layer instead of a token-length KV cache, at the cost of lossy compression.
 
 The current experimental run is a multimodal duplex model trained on text dialogue, instruction data, ASR rows, TTS rows, audio reconstruction, and hybrid speech-dialogue supervision. It uses a byte-level BPE tokenizer with protocol tokens, EnCodec audio tokens, stateful chunk sampling, and weighted losses for content, control, modality, and audio-codebook targets.
@@ -34,6 +37,41 @@ Latest completed evaluation: step 55,000 from `outputs/propagator-multimodal-v2`
 | Optimizer | AdamW, peak LR 3e-4 |
 
 The run is still a research prototype. Turn-taking and output-mode control are already learnable, but generated language quality is uneven and exact audio-codebook accuracy remains low.
+
+## Training Data
+
+The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix_v3.json`. The mix combines public text, instruction, dialogue, ASR, TTS, and paired speech-dialogue datasets with a small local identity set for model-name consistency.
+
+The weights below are sampling weights used by the training pipeline, not exact final token percentages. Audio rows are converted into EnCodec token streams, then packed into the same event protocol as text rows.
+
+| Source | Role in training | Mode | Weight |
+| :--- | :--- | :--- | ---: |
+| `KurtDu/EchoX-Dialogues-Plus` (`S2S-QA/AudioQA`) | Paired user speech, assistant text, and assistant speech for hybrid speech-dialogue responses | `echox_s2s_dialogue` | 0.18 |
+| `HuggingFaceFW/fineweb-edu` | General text continuation and language modeling coverage | `plain_text` | 0.15 |
+| `xinrongzhang2022/Duplex-UltraChat` | Text dialogue, turn-taking, idle listening, and interruption-style protocol behavior | `duplex_chat` | 0.10 |
+| `blabble-io/libritts_r` | Clean read-speech data weighted mostly toward text-to-audio generation | `audio_asr` | 0.08 |
+| `facebook/voxpopuli` | Real speech recognition and speech understanding coverage | `audio_asr` | 0.07 |
+| `openslr/librispeech_asr` (`train.clean.360`) | ASR-heavy speech supervision with some TTS targets | `audio_asr` | 0.06 |
+| `openslr/librispeech_asr` (`train.other.500`) | Noisier ASR-heavy speech supervision | `audio_asr` | 0.06 |
+| `edinburghcstr/ami` | Meeting speech and conversational ASR supervision | `audio_asr` | 0.06 |
+| `distil-whisper/librispeech_asr` | Additional LibriSpeech-derived ASR/TTS coverage | `audio_asr` | 0.06 |
+| `wikimedia/wikipedia` | Factual and encyclopedic text continuation | `plain_text` | 0.05 |
+| `google/fleurs` (`en_us`) | Multispeaker English ASR/TTS coverage | `audio_asr` | 0.04 |
+| `data/propagator_identity.jsonl` | Local identity and self-description examples, repeated to remain visible in the mix | `duplex_chat` | 0.04 |
+| `databricks/databricks-dolly-15k` | Instruction following and direct response formatting | `dolly_instruction` | 0.03 |
+| `PolyAI/minds14` (`en-US`) | Short intent-style spoken utterances | `audio_asr` | 0.02 |
+
+### Supervision Tasks
+
+| Task | Input stream | Target stream | Purpose |
+| :--- | :--- | :--- | :--- |
+| Text->Text | User text or plain text | Assistant text or continuation | Dialogue, instruction following, and language modeling |
+| Audio->Text | EnCodec user audio tokens | Transcript text | ASR-style speech understanding |
+| Text->Audio | Text prompt | EnCodec assistant audio tokens | TTS-style acoustic generation |
+| Audio->Audio | EnCodec user audio tokens | EnCodec output audio tokens | Speech reconstruction and continuation |
+| Audio->Hybrid | EnCodec user audio tokens | Text followed by audio tokens | Full duplex-style speech dialogue response |
+
+Validation uses each source's validation split when one is available. For sources that only expose a training split, rows are deterministically partitioned by index so that `idx % 10 == 0` is held out for validation.
 
 ## Model Architecture and Theory
 
@@ -185,9 +223,7 @@ The architecture handles incoming user speech while managing the response state 
 | [AUDIO_END] | Audio output end | Terminates an audio segment |
 | [HYBRID_OUT] | Hybrid output mode | Declares a response containing text and audio |
 
-The multimodal training protocol covers four stream directions: Text->Text for dialogue and instruction data, Audio->Text for ASR-style rows, Text->Audio for TTS-style rows, and Audio->Audio for speech reconstruction/continuation. Hybrid rows use [HYBRID_OUT] followed by text content and an [AUDIO_OUT] audio segment. The default mix also includes EchoX paired speech-dialogue rows, where user speech is paired with assistant text and synthesized assistant speech for Audio->Hybrid response supervision.
-
-Dataset preprocessing is intentionally source-aware. EchoX rows are treated as speech-to-speech dialogue supervision; Duplex-UltraChat rows are text turn-taking and idle/interruption protocol supervision; AMI, LibriSpeech, FLEURS, MINDS-14, and VoxPopuli rows are ASR-oriented speech understanding data; LibriTTS-R rows are studio/read-speech data weighted toward TTS. This prevents clean read-speech corpora from being overused as fake full-duplex response data.
+The multimodal training protocol covers Text->Text, Audio->Text, Text->Audio, Audio->Audio, and Audio->Hybrid supervision. Hybrid rows use [HYBRID_OUT] followed by text content and an [AUDIO_OUT] audio segment.
 
 ### Sequence Diagram
 
