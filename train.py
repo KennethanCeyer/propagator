@@ -4281,9 +4281,8 @@ class PropagatorModel(nnx.Module):
         memories: tuple[jax.Array, ...],
         reset_mask: jax.Array,
     ) -> tuple[jax.Array, ...]:
-        zeros = self.initial_memories(reset_mask.shape[0])
         reset = reset_mask.astype(jnp.float32)[:, None, None]
-        return tuple(reset * z + (1.0 - reset) * m for m, z in zip(memories, zeros, strict=True))
+        return tuple((1.0 - reset) * m for m in memories)
 
     def step_hidden(
         self,
@@ -4338,12 +4337,12 @@ class PropagatorModel(nnx.Module):
         init_memories: tuple[jax.Array, ...],
         reset_mask: jax.Array,
         task_ids: jax.Array | None = None,
+        compute_metrics: bool = True,
     ) -> tuple[jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]]:
         input_mask = inputs[..., 0] != token_ids_pad if inputs.ndim == 3 else inputs != token_ids_pad
         memories = self.reset_memories(init_memories, reset_mask)
 
         smooth = jnp.asarray(self.cfg.label_smoothing, dtype=jnp.float32)
-        vocab_n = jnp.asarray(vocab_size, dtype=jnp.float32)
 
         def scan_step_plain(carry, step_inputs):
             step_in, step_target, step_weight, step_valid = step_inputs
@@ -4355,42 +4354,16 @@ class PropagatorModel(nnx.Module):
 
             log_probs = jax.nn.log_softmax(step_logits, axis=-1)
             nll = -jnp.take_along_axis(log_probs, main_target[..., None], axis=-1).squeeze(-1)
-            smooth_loss = -jnp.mean(log_probs, axis=-1)
-            mixed_nll = (1.0 - smooth) * nll + smooth * smooth_loss
+            if float(self.cfg.label_smoothing) > 0.0:
+                smooth_loss = -jnp.mean(log_probs, axis=-1)
+                mixed_nll = (1.0 - smooth) * nll + smooth * smooth_loss
+            else:
+                mixed_nll = nll
 
             weighted_nll = mixed_nll * step_weight
 
-            pred = jnp.argmax(step_logits, axis=-1).astype(jnp.int32)
-            supervised = step_weight > 0.0
-            correct = jnp.logical_and(supervised, pred == main_target)
-
-            decision_target = jnp.logical_or(main_target == token_ids_listen, main_target == token_ids_user_end)
-            decision_target = jnp.logical_or(decision_target, main_target == token_ids_user_interrupt)
-            decision_mask = jnp.logical_and(supervised, decision_target)
-
-            listen_mask = jnp.logical_and(supervised, main_target == token_ids_listen)
-            user_end_mask = jnp.logical_and(supervised, main_target == token_ids_user_end)
-            interrupt_mask = jnp.logical_and(supervised, main_target == token_ids_user_interrupt)
-            model_end_mask = jnp.logical_and(supervised, main_target == token_ids_model_end)
-
-            audio_mask = jnp.logical_and(supervised, main_target >= audio_token_start)
-            audio_mask = jnp.logical_and(audio_mask, main_target < audio_token_end)
-
-            special_mask = jnp.logical_or(main_target == token_ids_listen, main_target == token_ids_user_end)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_user_interrupt)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_model_end)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_session_end)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_end)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_text_out)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_out)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_hybrid_out)
-            special_mask = jnp.logical_or(special_mask, main_target == token_ids_pad)
-
-            text_mask = jnp.logical_and(supervised, jnp.logical_not(audio_mask))
-            text_mask = jnp.logical_and(text_mask, jnp.logical_not(special_mask))
-
             total_aux_nll = jnp.zeros_like(weighted_nll)
-            audio_codebook_correct = jnp.zeros_like(audio_mask)
+            audio_codebook_correct = jnp.zeros_like(step_weight, dtype=jnp.bool_)
 
             if step_target.ndim == 2:
                 aux_logits = self.audio_aux_heads(hidden) # (batch, 7 * audio_codebook_size)
@@ -4410,41 +4383,73 @@ class PropagatorModel(nnx.Module):
                 aux_nll_masked = aux_nll * is_audio_aux.astype(jnp.float32)
                 total_aux_nll = jnp.mean(aux_nll_masked, axis=1) * 7.0 # Sum over active heads
 
-                aux_preds = jnp.argmax(aux_logits, axis=-1).astype(jnp.int32)
-                aux_correct = jnp.logical_and(is_audio_aux, aux_preds == aux_targets_rel)
-                # Count correct if all active aux heads are correct
-                audio_codebook_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1) == 7.0
+                if compute_metrics:
+                    aux_preds = jnp.argmax(aux_logits, axis=-1).astype(jnp.int32)
+                    aux_correct = jnp.logical_and(is_audio_aux, aux_preds == aux_targets_rel)
+                    audio_codebook_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1) == 7.0
+
+            if compute_metrics:
+                pred = jnp.argmax(step_logits, axis=-1).astype(jnp.int32)
+                supervised = step_weight > 0.0
+                correct = jnp.logical_and(supervised, pred == main_target)
+
+                decision_target = jnp.logical_or(main_target == token_ids_listen, main_target == token_ids_user_end)
+                decision_target = jnp.logical_or(decision_target, main_target == token_ids_user_interrupt)
+                decision_mask = jnp.logical_and(supervised, decision_target)
+
+                listen_mask = jnp.logical_and(supervised, main_target == token_ids_listen)
+                user_end_mask = jnp.logical_and(supervised, main_target == token_ids_user_end)
+                interrupt_mask = jnp.logical_and(supervised, main_target == token_ids_user_interrupt)
+                model_end_mask = jnp.logical_and(supervised, main_target == token_ids_model_end)
+
+                audio_mask = jnp.logical_and(supervised, main_target >= audio_token_start)
+                audio_mask = jnp.logical_and(audio_mask, main_target < audio_token_end)
+
+                special_mask = jnp.logical_or(main_target == token_ids_listen, main_target == token_ids_user_end)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_user_interrupt)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_model_end)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_session_end)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_end)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_text_out)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_out)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_hybrid_out)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_pad)
+
+                text_mask = jnp.logical_and(supervised, jnp.logical_not(audio_mask))
+                text_mask = jnp.logical_and(text_mask, jnp.logical_not(special_mask))
                 audio_codebook_correct = jnp.logical_and(audio_mask, audio_codebook_correct)
 
-            metrics = (
-                jnp.sum(jnp.logical_and(correct, decision_mask).astype(jnp.float32)),
-                jnp.sum(decision_mask.astype(jnp.float32)),
-                jnp.sum(jnp.logical_and(correct, listen_mask).astype(jnp.float32)),
-                jnp.sum(listen_mask.astype(jnp.float32)),
-                jnp.sum(jnp.logical_and(correct, user_end_mask).astype(jnp.float32)),
-                jnp.sum(user_end_mask.astype(jnp.float32)),
-                jnp.sum(jnp.logical_and(correct, interrupt_mask).astype(jnp.float32)),
-                jnp.sum(interrupt_mask.astype(jnp.float32)),
-                jnp.sum(jnp.logical_and(correct, model_end_mask).astype(jnp.float32)),
-                jnp.sum(model_end_mask.astype(jnp.float32)),
-                jnp.sum(jnp.logical_and(correct, text_mask).astype(jnp.float32)),
-                jnp.sum(text_mask.astype(jnp.float32)),
-                jnp.sum(jnp.logical_and(correct, audio_mask).astype(jnp.float32)),
-                jnp.sum(audio_mask.astype(jnp.float32)),
-                jnp.sum(audio_codebook_correct.astype(jnp.float32)),
-                jnp.sum(audio_mask.astype(jnp.float32)),
-            )
+                metrics = (
+                    jnp.sum(jnp.logical_and(correct, decision_mask).astype(jnp.float32)),
+                    jnp.sum(decision_mask.astype(jnp.float32)),
+                    jnp.sum(jnp.logical_and(correct, listen_mask).astype(jnp.float32)),
+                    jnp.sum(listen_mask.astype(jnp.float32)),
+                    jnp.sum(jnp.logical_and(correct, user_end_mask).astype(jnp.float32)),
+                    jnp.sum(user_end_mask.astype(jnp.float32)),
+                    jnp.sum(jnp.logical_and(correct, interrupt_mask).astype(jnp.float32)),
+                    jnp.sum(interrupt_mask.astype(jnp.float32)),
+                    jnp.sum(jnp.logical_and(correct, model_end_mask).astype(jnp.float32)),
+                    jnp.sum(model_end_mask.astype(jnp.float32)),
+                    jnp.sum(jnp.logical_and(correct, text_mask).astype(jnp.float32)),
+                    jnp.sum(text_mask.astype(jnp.float32)),
+                    jnp.sum(jnp.logical_and(correct, audio_mask).astype(jnp.float32)),
+                    jnp.sum(audio_mask.astype(jnp.float32)),
+                    jnp.sum(audio_codebook_correct.astype(jnp.float32)),
+                    jnp.sum(audio_mask.astype(jnp.float32)),
+                )
 
-            # Task separation (0: Text, 1: ASR, 2: TTS, 3: Duplex)
-            task_correct = jnp.zeros(4, dtype=jnp.float32)
-            task_total = jnp.zeros(4, dtype=jnp.float32)
-            if task_ids is not None:
-                token_correct = jnp.logical_and(correct, jnp.logical_or(text_mask, audio_mask)).astype(jnp.float32)
-                token_total = jnp.logical_or(text_mask, audio_mask).astype(jnp.float32)
-                task_correct = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_correct, 0.0)))(jnp.arange(4))
-                task_total = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_total, 0.0)))(jnp.arange(4))
+                # Task separation (0: Text, 1: ASR, 2: TTS, 3: Duplex)
+                task_correct = jnp.zeros(4, dtype=jnp.float32)
+                task_total = jnp.zeros(4, dtype=jnp.float32)
+                if task_ids is not None:
+                    token_correct = jnp.logical_and(correct, jnp.logical_or(text_mask, audio_mask)).astype(jnp.float32)
+                    token_total = jnp.logical_or(text_mask, audio_mask).astype(jnp.float32)
+                    task_correct = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_correct, 0.0)))(jnp.arange(4))
+                    task_total = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_total, 0.0)))(jnp.arange(4))
 
-            metrics = metrics + tuple(task_correct) + tuple(task_total)
+                metrics = metrics + tuple(task_correct) + tuple(task_total)
+            else:
+                metrics = tuple(jnp.zeros((), dtype=jnp.float32) for _ in range(24))
 
             combined_loss = weighted_nll + total_aux_nll * float(self.cfg.audio_codebook_loss_weight) * step_weight
             combined_weight = step_weight
@@ -4470,7 +4475,14 @@ class PropagatorModel(nnx.Module):
         batch_size = inputs.shape[0]
         init_memories = self.initial_memories(batch_size)
         reset_mask = jnp.ones((batch_size,), dtype=jnp.bool_)
-        total_loss, ce_loss, _, _ = self.forward_with_memories(inputs, targets, loss_weights, init_memories, reset_mask)
+        total_loss, ce_loss, _, _ = self.forward_with_memories(
+            inputs,
+            targets,
+            loss_weights,
+            init_memories,
+            reset_mask,
+            compute_metrics=False,
+        )
         return total_loss, ce_loss
 
 
@@ -4507,6 +4519,7 @@ def train_step_stateful(
             weights,
             memories,
             reset_mask,
+            compute_metrics=False,
         )
         return total_loss, (ce_loss, final_memories)
 
