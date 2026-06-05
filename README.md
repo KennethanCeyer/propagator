@@ -42,7 +42,7 @@ The run is still a research prototype. Turn-taking and output-mode control are a
 
 The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix_v3.json`. The mix combines public text, instruction, dialogue, ASR, TTS, and paired speech-dialogue datasets with a small local identity set for model-name consistency.
 
-The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current local cache contains `977,638,592` packed training tokens; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training.
+The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current training mix contains `977,638,592` packed training tokens; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training.
 
 | Source | Description | Type | Weight | Tokens |
 | :--- | :--- | :--- | ---: | ---: |
