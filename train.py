@@ -385,7 +385,7 @@ class PropagatorConfig(BaseSettings):
 
     eval_every: int = 5000
     checkpoint_every: int = 10_000
-    train_log_every: int = 100
+    train_log_every: int = 2000
     sample_gen_len: int = 256
     sample_chunks: str = '["Hello", "could you", "tell me", "what", "your name", "is?"]'
     eval_text_cases: str = json.dumps(
@@ -522,7 +522,7 @@ class PropagatorConfig(BaseSettings):
     data_axis_name: str = "data"
     auto_batch_hbm_gb: float = 0.0
     auto_batch_memory_util: float = 0.78
-    auto_batch_max_per_device: int = 16
+    auto_batch_max_per_device: int = 8
     auto_batch_multiple_per_device: int = 8
 
     edge_vram_mb: int = 2048

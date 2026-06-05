@@ -38,6 +38,7 @@ export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-$CPU_COUNT}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_COUNT}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-$CPU_COUNT}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_COUNT}"
+export TPU_RUNTIME_METRICS_PORTS="${TPU_RUNTIME_METRICS_PORTS:-8431,8432,8433,8434}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PYTHONUNBUFFERED=1
 
@@ -144,12 +145,12 @@ TRAIN_ARGS=(
     --audio-min-generation-seconds "$AUDIO_MIN_GENERATION_SECONDS"
     --audio-eval-normalize-rms "${AUDIO_EVAL_NORMALIZE_RMS:-0.06}"
     --audio-low-rms-threshold "${AUDIO_LOW_RMS_THRESHOLD:-0.005}"
-    --train-log-every "${TRAIN_LOG_EVERY:-100}"
+    --train-log-every "${TRAIN_LOG_EVERY:-2000}"
     --checkpoint-every "$CHECKPOINT_EVERY"
     --local-checkpoint-keep "$LOCAL_CHECKPOINT_KEEP"
     --gcs-sync-every "$GCS_SYNC_EVERY"
     --gcs-backup-keep "$GCS_BACKUP_KEEP"
-    --auto-batch-max-per-device "${AUTO_BATCH_MAX_PER_DEVICE:-16}"
+    --auto-batch-max-per-device "${AUTO_BATCH_MAX_PER_DEVICE:-8}"
     --auto-batch-multiple-per-device "${AUTO_BATCH_MULTIPLE_PER_DEVICE:-8}"
     --auto-batch-memory-util "${AUTO_BATCH_MEMORY_UTIL:-0.78}"
     --epochs "${EPOCHS:-30}"
