@@ -3,6 +3,7 @@
 
 import argparse
 import atexit
+import functools
 import hashlib
 import io
 import json
@@ -4486,7 +4487,7 @@ class PropagatorModel(nnx.Module):
         return total_loss, ce_loss
 
 
-@nnx.jit
+@functools.partial(nnx.jit, donate_argnums=(2, 3, 4))
 def train_step_stateless(
     model: PropagatorModel,
     optimizer: nnx.Optimizer,
@@ -4502,7 +4503,7 @@ def train_step_stateless(
     return ce_loss
 
 
-@nnx.jit
+@functools.partial(nnx.jit, donate_argnums=(2, 3, 4, 5, 6))
 def train_step_stateful(
     model: PropagatorModel,
     optimizer: nnx.Optimizer,
