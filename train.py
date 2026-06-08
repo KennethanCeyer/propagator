@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 import urllib.error
@@ -5921,7 +5922,7 @@ def prune_gcs_backups(root: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def parse_gcs_backup_target(step: int) -> tuple[str, str]:
+def parse_gcs_backup_base() -> tuple[str, str]:
     raw = (config.gcs_backup_dir or "").strip()
     if not raw:
         raw = os.environ.get("GCS_BACKUP_DIR", "").strip()
@@ -5941,17 +5942,24 @@ def parse_gcs_backup_target(step: int) -> tuple[str, str]:
         raw = f"gs://{bucket}/{TRAINING_RUN_NAME}"
 
     if raw.startswith("/gcs/"):
-        return "", str(Path(raw) / f"sync_step_{step}")
+        return "", str(Path(raw))
 
     if not raw.startswith("gs://"):
-        return "", str(Path(raw) / f"sync_step_{step}")
+        return "", str(Path(raw))
 
     without_scheme = raw[len("gs://") :].strip("/")
     bucket, _, prefix = without_scheme.partition("/")
     target = f"gs://{bucket}"
     if prefix:
         target = f"{target}/{prefix.strip('/')}"
-    return bucket, f"{target}/sync_step_{step}"
+    return bucket, target
+
+
+def parse_gcs_backup_target(step: int) -> tuple[str, str]:
+    bucket, base_target = parse_gcs_backup_base()
+    if base_target.startswith("gs://"):
+        return bucket, f"{base_target.rstrip('/')}/sync_step_{step}"
+    return bucket, str(Path(base_target) / f"sync_step_{step}")
 
 
 def create_gcs_bucket_if_needed(bucket: str) -> None:
@@ -5987,20 +5995,82 @@ def create_gcs_bucket_if_needed(bucket: str) -> None:
         log_info(f"[GCS] Bucket create skipped/failed for gs://{bucket}: {stderr.strip()}")
 
 
-def gcs_rsync_command(source: Path, target: str) -> list[str]:
+def gcs_rsync_command(source: Path, target: str, *, delete: bool = True) -> list[str]:
     exclude = r"(^|/)(\.venv|__pycache__|\.git)(/|$)|(^|/)outputs/cache(/|$)"
     gsutil = shutil.which("gsutil")
     if gsutil:
         probe = subprocess.run([gsutil, "version", "-l"], text=True, capture_output=True)
         if probe.returncode == 0:
-            return [gsutil, "-m", "rsync", "-r", "-x", exclude, str(source), target]
+            cmd = [gsutil, "-m", "rsync"]
+            if delete:
+                cmd.append("-d")
+            return [*cmd, "-r", "-x", exclude, str(source), target]
         log_info(f"[GCS] gsutil unavailable, falling back to gcloud storage: {((probe.stderr or '') + (probe.stdout or '')).strip()[:500]}")
 
     gcloud = shutil.which("gcloud")
     if gcloud:
-        return [gcloud, "storage", "rsync", str(source), target, "--recursive", "--exclude", exclude]
+        cmd = [gcloud, "storage", "rsync", str(source), target, "--recursive", "--exclude", exclude]
+        if delete:
+            cmd.append("--delete-unmatched-destination-objects")
+        return cmd
 
     raise RuntimeError("gsutil or gcloud is required for gs:// backup targets")
+
+
+def backup_child_target(target: str, child: str) -> str:
+    child_clean = child.strip("/")
+    if target.startswith("gs://"):
+        return f"{target.rstrip('/')}/{child_clean}"
+    return str(Path(target) / child_clean)
+
+
+def sync_backup_dir(source: Path, target: str, bucket: str) -> None:
+    if target.startswith("gs://"):
+        create_gcs_bucket_if_needed(bucket)
+        cmd = gcs_rsync_command(source, target)
+        subprocess.run(cmd, check=True)
+    else:
+        copytree_replace(source, Path(target))
+
+
+def sync_backup_file(source: Path, target: str, bucket: str) -> None:
+    if target.startswith("gs://"):
+        create_gcs_bucket_if_needed(bucket)
+        gcloud = shutil.which("gcloud")
+        if gcloud:
+            subprocess.run([gcloud, "storage", "cp", str(source), target], check=True)
+            return
+        gsutil = shutil.which("gsutil")
+        if gsutil:
+            subprocess.run([gsutil, "cp", str(source), target], check=True)
+            return
+        raise RuntimeError("gsutil or gcloud is required for gs:// backup targets")
+
+    dst = Path(target)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, dst)
+
+
+def sync_checkpoint_to_gcs(step: int, step_dir: Path) -> None:
+    bucket, base_target = parse_gcs_backup_base()
+    checkpoint_dir = step_dir.resolve() / "checkpoint"
+    if not checkpoint_dir.is_dir():
+        log_info(f"[GCS] Checkpoint source missing, skipped: {checkpoint_dir}")
+        return
+
+    versioned_target = backup_child_target(parse_gcs_backup_target(step)[1], "checkpoint")
+    latest_target = backup_child_target(base_target, "latest_checkpoint")
+    log_info(f"[GCS] Syncing checkpoint for step {step} to {versioned_target} ...")
+    sync_backup_dir(checkpoint_dir, versioned_target, bucket)
+    log_info(f"[GCS] Syncing latest checkpoint pointer to {latest_target} ...")
+    sync_backup_dir(checkpoint_dir, latest_target, bucket)
+
+    with tempfile.TemporaryDirectory(prefix="propagator-latest-checkpoint-") as tmp:
+        marker = Path(tmp) / "latest_checkpoint_step.txt"
+        marker.write_text(f"{step}\n", encoding="utf-8")
+        sync_backup_file(marker, backup_child_target(base_target, "latest_checkpoint_step.txt"), bucket)
+
+    log_info(f"[GCS] Checkpoint backup complete for step {step}")
 
 
 def start_gcs_backup(step: int, source_dir: Path) -> None:
@@ -6008,14 +6078,18 @@ def start_gcs_backup(step: int, source_dir: Path) -> None:
         try:
             bucket, target = parse_gcs_backup_target(step)
             project_dir = Path(__file__).resolve().parent
-            log_info(f"[GCS] Syncing project folder to {target} ...")
+            source_dir_resolved = source_dir.resolve()
+            project_target = backup_child_target(target, "project")
+            output_target = backup_child_target(target, "output")
+            log_info(f"[GCS] Syncing project folder to {project_target} ...")
 
-            if target.startswith("gs://"):
-                create_gcs_bucket_if_needed(bucket)
-                cmd = gcs_rsync_command(project_dir, target)
-                subprocess.run(cmd, check=True)
+            sync_backup_dir(project_dir, project_target, bucket)
+
+            if source_dir_resolved.exists():
+                log_info(f"[GCS] Syncing training output to {output_target} ...")
+                sync_backup_dir(source_dir_resolved, output_target, bucket)
             else:
-                copytree_replace(project_dir, Path(target))
+                log_info(f"[GCS] Training output source missing, skipped: {source_dir_resolved}")
 
             log_info(f"[GCS] Backup complete for step {step} to {target}")
         except Exception as exc:
@@ -6408,7 +6482,17 @@ def main() -> None:
         if act_step % config.checkpoint_every == 0 or act_step == total_steps:
             ckpt_dir = output_root / f"step_{act_step}"
             save_checkpoint(checkpointer, model, optimizer, ckpt_dir)
-            prune_local_checkpoint_dirs(output_root)
+            checkpoint_backup_ok = True
+            if config.gcs_sync_every > 0:
+                try:
+                    sync_checkpoint_to_gcs(act_step, ckpt_dir)
+                except Exception as exc:
+                    checkpoint_backup_ok = False
+                    log_info(f"[GCS] Checkpoint backup failed for step {act_step}: {exc}")
+            if checkpoint_backup_ok:
+                prune_local_checkpoint_dirs(output_root)
+            else:
+                log_info("[Checkpoint] Local checkpoint pruning skipped because GCS checkpoint backup failed")
 
         if config.gcs_sync_every > 0 and act_step % config.gcs_sync_every == 0:
             start_gcs_backup(act_step, output_root / f"step_{act_step}")

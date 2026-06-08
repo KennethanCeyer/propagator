@@ -21,7 +21,7 @@ The current experimental run is a multimodal duplex model trained on text dialog
 
 ## Current Snapshot
 
-Latest completed evaluation: step 55,000 from `outputs/propagator-multimodal-v2`.
+Latest completed evaluation: step 440,000 from `outputs/propagator-multimodal-v2`.
 
 | Item | Value |
 | :--- | :--- |
@@ -270,20 +270,20 @@ The reported CE is a weighted multimodal objective, not a plain text perplexity.
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Latest completed eval at step 55,000:
+Latest completed eval at step 440,000:
 
 | Metric | Value |
 | :--- | ---: |
-| Train weighted CE | 53.15 |
-| Validation weighted CE | 68.79 |
-| Best validation weighted CE so far | 65.84 at step 50,000 |
-| Decision accuracy | 94.51% |
-| Listen accuracy | 94.68% |
-| User-end accuracy | 72.66% |
-| Model-end accuracy | 72.73% |
-| Text token accuracy | 31.82% |
-| Audio token accuracy | 37.25% |
-| Audio codebook exact accuracy | 2.15% |
+| Train weighted CE | 34.74 |
+| Validation weighted CE | 52.75 |
+| Best validation weighted CE so far | 44.26 at step 335,000 |
+| Decision accuracy | 98.82% |
+| Listen accuracy | 99.10% |
+| User-end accuracy | 63.57% |
+| Model-end accuracy | 63.89% |
+| Text token accuracy | 39.62% |
+| Audio token accuracy | 35.51% |
+| Audio codebook exact accuracy | 1.93% |
 
 ### Protocol and Modality
 
@@ -305,7 +305,7 @@ Latest completed eval at step 55,000:
 
 ## Output Examples
 
-These examples are from the step 55,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
+These examples are from the step 440,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
 
 ### Identity Prompt
 
