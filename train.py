@@ -247,6 +247,20 @@ audio_token_id: Any = None
 _RUN_LOCK_FD: int | None = None
 _RUN_LOCK_PATH: Path | None = None
 _ACTIVE_POOLS: list[Any] = []
+train_control_input_tokens: np.ndarray | None = None
+train_control_target_tokens: np.ndarray | None = None
+train_control_loss_weights: np.ndarray | None = None
+train_control_stream_ids: np.ndarray | None = None
+train_control_chunk_positions: np.ndarray | None = None
+train_control_chunk_task_ids: np.ndarray | None = None
+val_control_input_tokens: np.ndarray | None = None
+val_control_target_tokens: np.ndarray | None = None
+val_control_loss_weights: np.ndarray | None = None
+val_control_stream_ids: np.ndarray | None = None
+val_control_chunk_positions: np.ndarray | None = None
+val_control_chunk_task_ids: np.ndarray | None = None
+
+VALIDATION_METRIC_SIZE = 32
 
 SPECIAL_TOKENS = [
     "[PAD]",
@@ -450,8 +464,13 @@ class PropagatorConfig(BaseSettings):
     stateful_train: bool = True
     stateful_validation: bool = True
     validation_batches: int = 16
+    validation_control_batches: int = 4
     same_split_validation_stride: int = 10
     same_split_validation_offset: int = 0
+    synthetic_control_train_examples: int = 2048
+    synthetic_control_val_examples: int = 512
+    synthetic_control_train_rate: float = 0.10
+    synthetic_interrupt_fraction: float = 0.60
 
     tokenizer_path: str = "assets/tokenizer-byte-bpe-16000.json"
     tokenizer_vocab_size: int = 16_000
@@ -496,7 +515,7 @@ class PropagatorConfig(BaseSettings):
     audio_out_loss_weight: float = 8.0
     audio_end_loss_weight: float = 8.0
     output_modality_loss_weight: float = 4.0
-    audio_min_generation_seconds: float = 1.0
+    audio_min_generation_seconds: float = 5.0
     audio_min_generation_tokens: int = 256
     silence_short_tokens: int = 2
     silence_end_tokens: int = 4
@@ -662,8 +681,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stateful-validation", action="store_true")
     parser.add_argument("--stateless-validation", action="store_true")
     parser.add_argument("--validation-batches", type=int)
+    parser.add_argument("--validation-control-batches", type=int)
     parser.add_argument("--same-split-validation-stride", type=int)
     parser.add_argument("--same-split-validation-offset", type=int)
+    parser.add_argument("--synthetic-control-train-examples", type=int)
+    parser.add_argument("--synthetic-control-val-examples", type=int)
+    parser.add_argument("--synthetic-control-train-rate", type=float)
+    parser.add_argument("--synthetic-interrupt-fraction", type=float)
 
     parser.add_argument("--tokenizer-path", type=str)
     parser.add_argument("--tokenizer-vocab-size", type=int)
@@ -1955,8 +1979,14 @@ def remove_target_stats(stats: dict[str, int], target_id: int, weight: float) ->
         stats["content"] -= 1
 
 
-def tokenize_duplex(row: dict) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
+def tokenize_duplex(
+    row: dict,
+    *,
+    allow_user_interrupts: bool | None = None,
+) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
     events = non_idle_events(row)
+    if allow_user_interrupts is None:
+        allow_user_interrupts = bool(row.get("allow_user_interrupts", False))
 
     in_ids: list[list[int]] = []
     tr_ids: list[list[int]] = []
@@ -2098,12 +2128,15 @@ def tokenize_duplex(row: dict) -> tuple[list[list[int]], list[list[int]], list[f
                     push_model_token(token_id)
 
             if next_role == "user":
-                # The actual interrupt edge is injected when the following user event is consumed.
-                # Keeping model_open here lets inject_user_interrupt() convert the edge into:
-                # previous_model_token -> [USER_INTERRUPT] with optional zero loss
-                # [USER_INTERRUPT] -> [MODEL_END]
-                # [MODEL_END] -> [USER]
-                pass
+                if allow_user_interrupts:
+                    # The actual interrupt edge is injected when the following user event is consumed.
+                    # Keeping model_open here lets inject_user_interrupt() convert the edge into:
+                    # previous_model_token -> [USER_INTERRUPT] with optional zero loss
+                    # [USER_INTERRUPT] -> [MODEL_END]
+                    # [MODEL_END] -> [USER]
+                    pass
+                else:
+                    close_model_normally(token_ids["user"])
             elif next_role != "assistant":
                 close_model_normally(token_ids["session_end"])
 
@@ -2994,6 +3027,137 @@ def chunk_tokenized_stream(
         chunks.append((chunk_in, chunk_tr, chunk_w, stats))
 
     return chunks
+
+
+def synthetic_control_rows(count: int, *, split_name: str) -> list[dict[str, Any]]:
+    if count <= 0:
+        return []
+
+    user_prompts = [
+        "Can you explain this slowly?",
+        "Please summarize the safety checklist.",
+        "What is your name?",
+        "Tell me how the memory matrix works.",
+        "Give me a short answer.",
+        "Describe the audio pipeline.",
+        "Help me debug this training run.",
+        "What should I look at next?",
+    ]
+    assistant_parts = [
+        "Sure. I will start with the main point and keep it concise.",
+        "The important part is to separate the protocol decision from the content tokens.",
+        "Propagator is the model name, and it uses a recurrent matrix memory.",
+        "First, check the validation totals, then inspect the generated samples.",
+        "A stable run should keep checkpoints, logs, and metrics moving together.",
+        "The audio path uses codec tokens, so frame consistency matters.",
+    ]
+    interrupt_phrases = [
+        "Actually, make it shorter.",
+        "Wait, answer in one sentence.",
+        "Stop there and use simpler words.",
+        "New question: what changed?",
+        "Interrupting: focus on the metric.",
+        "Hold on, explain the risk first.",
+    ]
+    followups = [
+        "Thanks, continue.",
+        "Now give the next step.",
+        "That helps, be specific.",
+        "Can you compare the options?",
+    ]
+
+    rows: list[dict[str, Any]] = []
+    interrupt_fraction = max(0.0, min(1.0, float(config.synthetic_interrupt_fraction)))
+    interrupt_count = int(round(count * interrupt_fraction))
+    for idx in range(count):
+        is_interrupt = idx < interrupt_count
+        prompt = user_prompts[idx % len(user_prompts)]
+        assistant = assistant_parts[(idx * 3) % len(assistant_parts)]
+        if is_interrupt:
+            rows.append(
+                {
+                    "allow_user_interrupts": True,
+                    "output": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": assistant},
+                        {"role": "user", "content": interrupt_phrases[idx % len(interrupt_phrases)]},
+                        {"role": "assistant", "content": assistant_parts[(idx * 5 + 1) % len(assistant_parts)]},
+                    ],
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "allow_user_interrupts": False,
+                    "output": [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": assistant},
+                        {"role": "user", "content": followups[idx % len(followups)]},
+                        {"role": "assistant", "content": assistant_parts[(idx * 7 + 2) % len(assistant_parts)]},
+                    ],
+                }
+            )
+    rng = np.random.default_rng(config.seed + (17 if split_name == "train" else 31))
+    rng.shuffle(rows)
+    return rows
+
+
+def build_synthetic_control_chunks(
+    split_name: str,
+    example_count: int,
+    stream_offset: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    rows = synthetic_control_rows(example_count, split_name=split_name)
+    unroll_len = int(config.train_unroll_len)
+    pad_id = token_ids["pad"]
+    input_chunks: list[np.ndarray] = []
+    target_chunks: list[np.ndarray] = []
+    weight_chunks: list[np.ndarray] = []
+    stream_ids_local: list[int] = []
+    chunk_positions_local: list[int] = []
+    aggregate_stats = {**new_target_stats(), "source_rows": 0, "skipped_chunks": 0, "errors": 0}
+
+    for row_idx, row in enumerate(rows):
+        try:
+            in_ids, tr_ids, row_weights, _ = tokenize_duplex(
+                row,
+                allow_user_interrupts=bool(row.get("allow_user_interrupts", False)),
+            )
+            chunks = chunk_tokenized_stream(in_ids, tr_ids, row_weights, unroll_len)
+        except Exception:
+            aggregate_stats["errors"] += 1
+            continue
+        if not chunks:
+            aggregate_stats["skipped_chunks"] += 1
+            continue
+        for chunk_pos, (chunk_in, chunk_tr, chunk_w, chunk_stats) in enumerate(chunks):
+            input_chunks.append(np.asarray(pad_to_len(chunk_in, unroll_len, pad_id), dtype=np.int32))
+            target_chunks.append(np.asarray(pad_to_len(chunk_tr, unroll_len, pad_id), dtype=np.int32))
+            weight_chunks.append(np.asarray(pad_weights(chunk_w, unroll_len), dtype=np.float32))
+            stream_ids_local.append(stream_offset + row_idx)
+            chunk_positions_local.append(chunk_pos)
+            for key, value in chunk_stats.items():
+                aggregate_stats[key] += int(value)
+        aggregate_stats["source_rows"] += 1
+
+    if not input_chunks:
+        empty_inputs = np.zeros((0, unroll_len, 8), dtype=np.int32)
+        empty_weights = np.zeros((0, unroll_len), dtype=np.float32)
+        empty_ids = np.zeros((0,), dtype=np.int64)
+        empty_pos = np.zeros((0,), dtype=np.int32)
+        return empty_inputs, empty_inputs.copy(), empty_weights, empty_ids, empty_pos
+
+    log_info(
+        f"[Synthetic:{split_name}] built control chunks={len(input_chunks)} "
+        f"from rows={aggregate_stats['source_rows']}: {json.dumps(aggregate_stats, ensure_ascii=False)}"
+    )
+    return (
+        np.stack(input_chunks, axis=0),
+        np.stack(target_chunks, axis=0),
+        np.stack(weight_chunks, axis=0),
+        np.asarray(stream_ids_local, dtype=np.int64),
+        np.asarray(chunk_positions_local, dtype=np.int32),
+    )
 
 
 def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0):
@@ -4366,6 +4530,9 @@ class PropagatorModel(nnx.Module):
 
             total_aux_nll = jnp.zeros_like(weighted_nll)
             audio_codebook_correct = jnp.zeros_like(step_weight, dtype=jnp.bool_)
+            aux_token_correct = jnp.zeros_like(step_weight, dtype=jnp.float32)
+            aux_token_total = jnp.zeros_like(step_weight, dtype=jnp.float32)
+            aux_frame_mask = jnp.zeros_like(step_weight, dtype=jnp.bool_)
 
             if step_target.ndim == 2:
                 aux_logits = self.audio_aux_heads(hidden) # (batch, 7 * audio_codebook_size)
@@ -4388,7 +4555,11 @@ class PropagatorModel(nnx.Module):
                 if compute_metrics:
                     aux_preds = jnp.argmax(aux_logits, axis=-1).astype(jnp.int32)
                     aux_correct = jnp.logical_and(is_audio_aux, aux_preds == aux_targets_rel)
-                    audio_codebook_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1) == 7.0
+                    aux_counts = jnp.sum(is_audio_aux.astype(jnp.float32), axis=1)
+                    aux_token_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1)
+                    aux_token_total = aux_counts
+                    aux_frame_mask = aux_counts > 0.0
+                    audio_codebook_correct = jnp.logical_and(aux_frame_mask, aux_token_correct == aux_counts)
 
             if compute_metrics:
                 pred = jnp.argmax(step_logits, axis=-1).astype(jnp.int32)
@@ -4420,6 +4591,12 @@ class PropagatorModel(nnx.Module):
                 text_mask = jnp.logical_and(supervised, jnp.logical_not(audio_mask))
                 text_mask = jnp.logical_and(text_mask, jnp.logical_not(special_mask))
                 audio_codebook_correct = jnp.logical_and(audio_mask, audio_codebook_correct)
+                audio_aux_frame_mask = jnp.logical_and(audio_mask, aux_frame_mask)
+                audio_all_codebook_correct = jnp.logical_and(correct, audio_codebook_correct)
+                audio_aux_token_correct = jnp.where(audio_mask, aux_token_correct, 0.0)
+                audio_aux_token_total = jnp.where(audio_mask, aux_token_total, 0.0)
+                aux_loss_mask = jnp.logical_and(supervised, audio_aux_frame_mask)
+                weighted_aux_nll = total_aux_nll * step_weight
 
                 metrics = (
                     jnp.sum(jnp.logical_and(correct, decision_mask).astype(jnp.float32)),
@@ -4437,7 +4614,15 @@ class PropagatorModel(nnx.Module):
                     jnp.sum(jnp.logical_and(correct, audio_mask).astype(jnp.float32)),
                     jnp.sum(audio_mask.astype(jnp.float32)),
                     jnp.sum(audio_codebook_correct.astype(jnp.float32)),
-                    jnp.sum(audio_mask.astype(jnp.float32)),
+                    jnp.sum(audio_aux_frame_mask.astype(jnp.float32)),
+                    jnp.sum(audio_aux_token_correct.astype(jnp.float32)),
+                    jnp.sum(audio_aux_token_total.astype(jnp.float32)),
+                    jnp.sum(audio_all_codebook_correct.astype(jnp.float32)),
+                    jnp.sum(audio_aux_frame_mask.astype(jnp.float32)),
+                    jnp.sum(weighted_nll.astype(jnp.float32)),
+                    jnp.sum(step_weight.astype(jnp.float32)),
+                    jnp.sum(weighted_aux_nll.astype(jnp.float32)),
+                    jnp.sum(jnp.where(aux_loss_mask, step_weight, 0.0).astype(jnp.float32)),
                 )
 
                 # Task separation (0: Text, 1: ASR, 2: TTS, 3: Duplex)
@@ -4451,7 +4636,7 @@ class PropagatorModel(nnx.Module):
 
                 metrics = metrics + tuple(task_correct) + tuple(task_total)
             else:
-                metrics = tuple(jnp.zeros((), dtype=jnp.float32) for _ in range(24))
+                metrics = tuple(jnp.zeros((), dtype=jnp.float32) for _ in range(VALIDATION_METRIC_SIZE))
 
             combined_loss = weighted_nll + total_aux_nll * float(self.cfg.audio_codebook_loss_weight) * step_weight
             combined_weight = step_weight
@@ -5396,10 +5581,55 @@ def get_batch_by_indices(
     weights_arr: np.ndarray,
     indices: np.ndarray,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    batch_inputs = maybe_put_batch(inputs_arr[indices], np.int32)
-    batch_targets = maybe_put_batch(targets_arr[indices], np.int32)
-    batch_weights = maybe_put_batch(weights_arr[indices], np.float32)
+    batch_inputs = maybe_put_batch(np.asarray(inputs_arr[indices], dtype=np.int32), np.int32)
+    batch_targets = maybe_put_batch(np.asarray(targets_arr[indices], dtype=np.int32), np.int32)
+    batch_weights = maybe_put_batch(np.asarray(weights_arr[indices], dtype=np.float32), np.float32)
     return batch_inputs, batch_targets, batch_weights
+
+
+def sample_control_indices(total: int, batch_size: int, seed: int) -> np.ndarray:
+    if total <= 0 or batch_size <= 0:
+        return np.zeros((0,), dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, total, size=(batch_size,), dtype=np.int64)
+
+
+def inject_train_control_examples(
+    batch_inputs_np: np.ndarray,
+    batch_targets_np: np.ndarray,
+    batch_weights_np: np.ndarray,
+    reset_mask_np: np.ndarray,
+    step: int,
+) -> None:
+    if train_control_input_tokens is None or len(train_control_input_tokens) == 0:
+        return
+    rate = max(0.0, min(1.0, float(config.synthetic_control_train_rate)))
+    if rate <= 0.0:
+        return
+    lane_count = int(round(int(config.batch_size) * rate))
+    lane_count = max(1, min(int(config.batch_size), lane_count))
+    indices = sample_control_indices(len(train_control_input_tokens), lane_count, config.seed + 40_000 + int(step))
+    lanes = np.arange(lane_count, dtype=np.int64)
+    batch_inputs_np[lanes] = np.asarray(train_control_input_tokens[indices], dtype=np.int32)
+    batch_targets_np[lanes] = np.asarray(train_control_target_tokens[indices], dtype=np.int32)
+    batch_weights_np[lanes] = np.asarray(train_control_loss_weights[indices], dtype=np.float32)
+    reset_mask_np[lanes] = True
+
+
+def get_validation_control_batch(idx: int) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    if val_control_input_tokens is None or len(val_control_input_tokens) == 0:
+        raise ValueError("No validation control chunks are available")
+    indices = sample_control_indices(len(val_control_input_tokens), int(config.batch_size), config.seed + 50_000 + int(idx))
+    batch_inputs = maybe_put_batch(np.asarray(val_control_input_tokens[indices], dtype=np.int32), np.int32)
+    batch_targets = maybe_put_batch(np.asarray(val_control_target_tokens[indices], dtype=np.int32), np.int32)
+    batch_weights = maybe_put_batch(np.asarray(val_control_loss_weights[indices], dtype=np.float32), np.float32)
+    reset_mask = maybe_put_vector(np.ones((int(config.batch_size),), dtype=np.bool_), np.bool_)
+    if val_control_chunk_task_ids is None:
+        task_ids_np = np.zeros((int(config.batch_size),), dtype=np.int32)
+    else:
+        task_ids_np = np.asarray(val_control_chunk_task_ids[indices], dtype=np.int32)
+    task_ids = maybe_put_vector(task_ids_np, np.int32)
+    return batch_inputs, batch_targets, batch_weights, reset_mask, task_ids
 
 
 def get_random_batch(step_index: int, shuffled_indices: np.ndarray) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -5468,6 +5698,14 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
         audio_total,
         audio_codebook_correct,
         audio_codebook_total,
+        audio_aux_token_correct,
+        audio_aux_token_total,
+        audio_all_codebook_correct,
+        audio_all_codebook_total,
+        main_nll_sum,
+        main_weight_sum,
+        aux_nll_sum,
+        aux_weight_sum,
         text_task_correct,
         asr_task_correct,
         tts_task_correct,
@@ -5481,31 +5719,49 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
     def ratio(num: float, den: float) -> float:
         return num / den if den > 0 else float("nan")
 
+    decision_parts = [
+        ratio(listen_correct, listen_total),
+        ratio(user_end_correct, user_end_total),
+        ratio(interrupt_correct, interrupt_total),
+    ]
+    decision_macro_parts = [value for value in decision_parts if math.isfinite(value)]
+    decision_macro_acc = float(np.mean(decision_macro_parts)) if decision_macro_parts else float("nan")
+
     return {
         "decision_acc": ratio(decision_correct, decision_total),
+        "decision_macro_acc": decision_macro_acc,
         "listen_acc": ratio(listen_correct, listen_total),
         "user_end_acc": ratio(user_end_correct, user_end_total),
         "interrupt_acc": ratio(interrupt_correct, interrupt_total),
         "model_end_acc": ratio(model_end_correct, model_end_total),
         "text_token_acc": ratio(text_correct, text_total),
         "audio_token_acc": ratio(audio_correct, audio_total),
+        "audio_main_acc": ratio(audio_correct, audio_total),
         "audio_codebook_acc": ratio(audio_codebook_correct, audio_codebook_total),
+        "audio_aux_frame_exact_acc": ratio(audio_codebook_correct, audio_codebook_total),
+        "audio_aux_token_acc": ratio(audio_aux_token_correct, audio_aux_token_total),
+        "audio_all_codebook_frame_exact_acc": ratio(audio_all_codebook_correct, audio_all_codebook_total),
+        "main_ce": ratio(main_nll_sum, main_weight_sum),
+        "aux_audio_ce": ratio(aux_nll_sum, aux_weight_sum),
         "text_task_acc": ratio(text_task_correct, text_task_total),
         "asr_task_acc": ratio(asr_task_correct, asr_task_total),
         "tts_task_acc": ratio(tts_task_correct, tts_task_total),
         "duplex_task_acc": ratio(duplex_task_correct, duplex_task_total),
         "decision_total": decision_total,
+        "listen_total": listen_total,
         "user_end_total": user_end_total,
         "interrupt_total": interrupt_total,
+        "model_end_total": model_end_total,
         "text_token_total": text_total,
         "audio_token_total": audio_total,
         "audio_codebook_total": audio_codebook_total,
+        "audio_aux_token_total": audio_aux_token_total,
     }
 
 
 def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, float]]:
     losses = []
-    metric_sums = np.zeros((24,), dtype=np.float64)
+    metric_sums = np.zeros((VALIDATION_METRIC_SIZE,), dtype=np.float64)
 
     if config.stateful_validation:
         sampler = StatefulChunkSampler(val_stream_ids, config.batch_size, config.seed + 10_000 + step)
@@ -5552,6 +5808,26 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
             task_ids = maybe_put_vector(task_ids_np, np.int32)
 
+            ce_loss, _, metrics = validation_step_stateful(
+                model,
+                batch_inputs,
+                batch_targets,
+                batch_weights,
+                memories,
+                reset_mask,
+                task_ids,
+            )
+            losses.append(float(ce_loss))
+            metric_sums += np.asarray([float(jax.device_get(x)) for x in metrics], dtype=np.float64)
+
+    if (
+        val_control_input_tokens is not None
+        and len(val_control_input_tokens) > 0
+        and int(config.validation_control_batches) > 0
+    ):
+        for i in range(int(config.validation_control_batches)):
+            batch_inputs, batch_targets, batch_weights, reset_mask, task_ids = get_validation_control_batch(step + i)
+            memories = initial_memories_for_training(model, config.batch_size)
             ce_loss, _, metrics = validation_step_stateful(
                 model,
                 batch_inputs,
@@ -6192,6 +6468,10 @@ def init_global_token_ids() -> None:
 def main() -> None:
     global config, train_input_tokens, train_target_tokens, train_loss_weights, train_stream_ids, train_chunk_positions
     global val_input_tokens, val_target_tokens, val_loss_weights, val_stream_ids, val_chunk_positions, val_chunk_task_ids
+    global train_control_input_tokens, train_control_target_tokens, train_control_loss_weights, train_control_stream_ids
+    global train_control_chunk_positions, train_control_chunk_task_ids
+    global val_control_input_tokens, val_control_target_tokens, val_control_loss_weights, val_control_stream_ids
+    global val_control_chunk_positions, val_control_chunk_task_ids
     global candidate_token_ids_host, audio_candidate_token_ids_host
 
     log_info(f"[{datetime.now().isoformat()}] Main started. Initializing config and tokenization...")
@@ -6220,6 +6500,38 @@ def main() -> None:
     ) = loaded
     init_global_token_ids()
     val_chunk_task_ids = build_chunk_task_ids(val_input_tokens, val_target_tokens, val_stream_ids)
+    (
+        train_control_input_tokens,
+        train_control_target_tokens,
+        train_control_loss_weights,
+        train_control_stream_ids,
+        train_control_chunk_positions,
+    ) = build_synthetic_control_chunks(
+        "train",
+        int(config.synthetic_control_train_examples),
+        9_000_000_000,
+    )
+    train_control_chunk_task_ids = build_chunk_task_ids(
+        train_control_input_tokens,
+        train_control_target_tokens,
+        train_control_stream_ids,
+    )
+    (
+        val_control_input_tokens,
+        val_control_target_tokens,
+        val_control_loss_weights,
+        val_control_stream_ids,
+        val_control_chunk_positions,
+    ) = build_synthetic_control_chunks(
+        "val",
+        int(config.synthetic_control_val_examples),
+        9_100_000_000,
+    )
+    val_control_chunk_task_ids = build_chunk_task_ids(
+        val_control_input_tokens,
+        val_control_target_tokens,
+        val_control_stream_ids,
+    )
 
     candidate_token_ids_host = build_candidate_token_ids(vocab_size)
     audio_candidate_token_ids_host = build_audio_candidate_token_ids()
@@ -6262,10 +6574,16 @@ def main() -> None:
     val_steps: list[int] = []
     val_losses: list[float] = []
     val_decision_accs: list[float] = []
+    val_decision_macro_accs: list[float] = []
     val_user_end_accs: list[float] = []
+    val_interrupt_accs: list[float] = []
     val_text_accs: list[float] = []
     val_audio_accs: list[float] = []
     val_audio_codebook_accs: list[float] = []
+    val_audio_aux_token_accs: list[float] = []
+    val_audio_all_codebook_frame_accs: list[float] = []
+    val_main_ces: list[float] = []
+    val_aux_audio_ces: list[float] = []
     val_text_task_accs: list[float] = []
     val_asr_task_accs: list[float] = []
     val_tts_task_accs: list[float] = []
@@ -6307,10 +6625,16 @@ def main() -> None:
                         val_steps.append(s)
                         val_losses.append(v_loss)
                         val_decision_accs.append(m.get("decision_acc", 0.0))
+                        val_decision_macro_accs.append(m.get("decision_macro_acc", float("nan")))
                         val_user_end_accs.append(m.get("user_end_acc", 0.0))
+                        val_interrupt_accs.append(m.get("interrupt_acc", float("nan")))
                         val_text_accs.append(m.get("text_token_acc", 0.0))
                         val_audio_accs.append(m.get("audio_token_acc", 0.0))
                         val_audio_codebook_accs.append(m.get("audio_codebook_acc", 0.0))
+                        val_audio_aux_token_accs.append(m.get("audio_aux_token_acc", float("nan")))
+                        val_audio_all_codebook_frame_accs.append(m.get("audio_all_codebook_frame_exact_acc", float("nan")))
+                        val_main_ces.append(m.get("main_ce", float("nan")))
+                        val_aux_audio_ces.append(m.get("aux_audio_ce", float("nan")))
                         val_text_task_accs.append(m.get("text_task_acc", 0.0))
                         val_asr_task_accs.append(m.get("asr_task_acc", 0.0))
                         val_tts_task_accs.append(m.get("tts_task_acc", 0.0))
@@ -6345,12 +6669,19 @@ def main() -> None:
             assert carry_memories is not None
 
             indices, reset_mask_np = train_sampler.next_indices()
-            batch_inputs, batch_targets, batch_weights = get_batch_by_indices(
-                train_input_tokens,
-                train_target_tokens,
-                train_loss_weights,
-                indices,
+            batch_inputs_np = np.asarray(train_input_tokens[indices], dtype=np.int32).copy()
+            batch_targets_np = np.asarray(train_target_tokens[indices], dtype=np.int32).copy()
+            batch_weights_np = np.asarray(train_loss_weights[indices], dtype=np.float32).copy()
+            inject_train_control_examples(
+                batch_inputs_np,
+                batch_targets_np,
+                batch_weights_np,
+                reset_mask_np,
+                step,
             )
+            batch_inputs = maybe_put_batch(batch_inputs_np, np.int32)
+            batch_targets = maybe_put_batch(batch_targets_np, np.int32)
+            batch_weights = maybe_put_batch(batch_weights_np, np.float32)
             reset_mask = maybe_put_vector(reset_mask_np, np.bool_)
             ce_loss_val, carry_memories = train_step_stateful(
                 model,
@@ -6402,10 +6733,16 @@ def main() -> None:
             val_steps.append(act_step)
             val_losses.append(v_loss)
             val_decision_accs.append(v_metrics["decision_acc"])
+            val_decision_macro_accs.append(v_metrics.get("decision_macro_acc", float("nan")))
             val_user_end_accs.append(v_metrics["user_end_acc"])
+            val_interrupt_accs.append(v_metrics.get("interrupt_acc", float("nan")))
             val_text_accs.append(v_metrics["text_token_acc"])
             val_audio_accs.append(v_metrics["audio_token_acc"])
             val_audio_codebook_accs.append(v_metrics["audio_codebook_acc"])
+            val_audio_aux_token_accs.append(v_metrics.get("audio_aux_token_acc", float("nan")))
+            val_audio_all_codebook_frame_accs.append(v_metrics.get("audio_all_codebook_frame_exact_acc", float("nan")))
+            val_main_ces.append(v_metrics.get("main_ce", float("nan")))
+            val_aux_audio_ces.append(v_metrics.get("aux_audio_ce", float("nan")))
             val_text_task_accs.append(v_metrics.get("text_task_acc", float("nan")))
             val_asr_task_accs.append(v_metrics.get("asr_task_acc", float("nan")))
             val_tts_task_accs.append(v_metrics.get("tts_task_acc", float("nan")))
@@ -6417,16 +6754,40 @@ def main() -> None:
             save_metric_plot(train_loss_steps, train_losses, out_dir / "train_loss.png", "Train weighted CE", act_step)
             save_metric_plot(val_steps, val_losses, out_dir / "val_loss.png", "Validation weighted CE", act_step)
             save_metric_plot(val_steps, val_decision_accs, out_dir / "val_decision_acc.png", "Validation decision accuracy", act_step)
+            save_metric_plot(
+                val_steps,
+                val_decision_macro_accs,
+                out_dir / "val_decision_macro_acc.png",
+                "Validation decision macro accuracy",
+                act_step,
+            )
             save_metric_plot(val_steps, val_user_end_accs, out_dir / "val_user_end_acc.png", "Validation user_end accuracy", act_step)
+            save_metric_plot(val_steps, val_interrupt_accs, out_dir / "val_interrupt_acc.png", "Validation interrupt accuracy", act_step)
             save_metric_plot(val_steps, val_text_accs, out_dir / "val_text_token_acc.png", "Validation text token accuracy", act_step)
             save_metric_plot(val_steps, val_audio_accs, out_dir / "val_audio_token_acc.png", "Validation audio token accuracy", act_step)
             save_metric_plot(
                 val_steps,
                 val_audio_codebook_accs,
                 out_dir / "val_audio_codebook_acc.png",
-                "Validation audio codebook accuracy",
+                "Validation aux frame exact accuracy",
                 act_step,
             )
+            save_metric_plot(
+                val_steps,
+                val_audio_aux_token_accs,
+                out_dir / "val_audio_aux_token_acc.png",
+                "Validation aux codebook token accuracy",
+                act_step,
+            )
+            save_metric_plot(
+                val_steps,
+                val_audio_all_codebook_frame_accs,
+                out_dir / "val_audio_all_codebook_frame_acc.png",
+                "Validation all-codebook frame exact accuracy",
+                act_step,
+            )
+            save_metric_plot(val_steps, val_main_ces, out_dir / "val_main_ce.png", "Validation main CE", act_step)
+            save_metric_plot(val_steps, val_aux_audio_ces, out_dir / "val_aux_audio_ce.png", "Validation aux audio CE", act_step)
             save_metric_plot(val_steps, val_text_task_accs, out_dir / "val_text_task_acc.png", "Validation Text Task Accuracy", act_step)
             save_metric_plot(val_steps, val_asr_task_accs, out_dir / "val_asr_task_acc.png", "Validation ASR Task Accuracy", act_step)
             save_metric_plot(val_steps, val_tts_task_accs, out_dir / "val_tts_task_acc.png", "Validation TTS Task Accuracy", act_step)
