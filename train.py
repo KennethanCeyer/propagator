@@ -6273,16 +6273,7 @@ def create_gcs_bucket_if_needed(bucket: str) -> None:
 
 def gcs_rsync_command(source: Path, target: str, *, delete: bool = True) -> list[str]:
     exclude = r"(^|/)(\.venv|__pycache__|\.git)(/|$)|(^|/)outputs/cache(/|$)"
-    gsutil = shutil.which("gsutil")
-    if gsutil:
-        probe = subprocess.run([gsutil, "version", "-l"], text=True, capture_output=True)
-        if probe.returncode == 0:
-            cmd = [gsutil, "-m", "rsync"]
-            if delete:
-                cmd.append("-d")
-            return [*cmd, "-r", "-x", exclude, str(source), target]
-        log_info(f"[GCS] gsutil unavailable, falling back to gcloud storage: {((probe.stderr or '') + (probe.stdout or '')).strip()[:500]}")
-
+    
     gcloud = shutil.which("gcloud")
     if gcloud:
         cmd = [gcloud, "storage", "rsync", str(source), target, "--recursive", "--exclude", exclude]
@@ -6290,7 +6281,7 @@ def gcs_rsync_command(source: Path, target: str, *, delete: bool = True) -> list
             cmd.append("--delete-unmatched-destination-objects")
         return cmd
 
-    raise RuntimeError("gsutil or gcloud is required for gs:// backup targets")
+    raise RuntimeError("gcloud is required for gs:// backup targets")
 
 
 def backup_child_target(target: str, child: str) -> str:
