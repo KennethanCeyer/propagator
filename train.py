@@ -237,7 +237,7 @@ def log_info(*args: Any, **kwargs: Any) -> None:
 configure_logging()
 
 TRAINING_RUN_NAME = "propagator-duplex"
-DEFAULT_OUTPUT_ROOT = str(Path("outputs") / TRAINING_RUN_NAME)
+DEFAULT_OUTPUT_ROOT = str(Path("outputs") / "propagator-multimodal")
 
 # Global configuration and state
 config: Any = None
@@ -260,7 +260,7 @@ val_control_stream_ids: np.ndarray | None = None
 val_control_chunk_positions: np.ndarray | None = None
 val_control_chunk_task_ids: np.ndarray | None = None
 
-VALIDATION_METRIC_SIZE = 32
+VALIDATION_METRIC_SIZE = 40
 
 SPECIAL_TOKENS = [
     "[PAD]",
@@ -380,6 +380,12 @@ DEFAULT_DATASET_MIX = json.dumps(
     ],
     separators=(",", ":"),
 )
+DEFAULT_DATASET_MIX_PATH = Path(__file__).resolve().parent / "data" / "propagator_dataset_mix.json"
+if DEFAULT_DATASET_MIX_PATH.exists():
+    DEFAULT_DATASET_MIX = json.dumps(
+        json.loads(DEFAULT_DATASET_MIX_PATH.read_text(encoding="utf-8")),
+        separators=(",", ":"),
+    )
 
 
 class PropagatorConfig(BaseSettings):
@@ -387,41 +393,50 @@ class PropagatorConfig(BaseSettings):
     num_layers: int = 24
     memory_key_size: int = 384
     memory_value_size: int = 768
+    associative_groups: int = 4
     mlp_multiplier: int = 4
+    use_swiglu: bool = True
+    moe_num_experts: int = 1
+    moe_top_k: int = 2
+    rope_base: float = 10_000.0
+    rope_position_scale: float = 16.0
+    rope_max_position: int = 1_048_576
 
     train_unroll_len: int = 32
     seq_len: int | None = None
     batch_size: int = 512
 
     learning_rate: float = 3e-4
-    warmup_steps: int = 2000
-    epochs: int = 30
-    max_train_steps: int | None = None
+    warmup_steps: int = 5000
+    epochs: int = 3
+    max_steps: int = 0
     seed: int = 42
 
     eval_every: int = 5000
     checkpoint_every: int = 10_000
     train_log_every: int = 2000
+    early_stopping_patience: int = 12
+    early_stopping_min_delta: float = 0.01
     sample_gen_len: int = 256
     sample_chunks: str = '["Hello", "could you", "tell me", "what", "your name", "is?"]'
     eval_text_cases: str = json.dumps(
         [
-            {"name": "greeting", "chunks": ["Hello", "are you listening?"]},
             {"name": "identity_name", "chunks": ["What", "is your name?"]},
-            {"name": "identity_purpose", "chunks": ["Who are you", "and what are you for?"]},
-            {"name": "identity_not_chatgpt", "chunks": ["Are you ChatGPT", "or something else?"]},
-            {"name": "identity_architecture", "chunks": ["What makes Propagator", "different from a Transformer?"]},
-            {"name": "instruction", "chunks": ["Please", "summarize", "a robot safety checklist."]},
-            {"name": "silence_turn", "chunks": ["I am going to pause", "[SILENCE]", "[SILENCE]", "[SILENCE]"]},
-            {"name": "interruption", "chunks": ["Actually wait", "stop", "new question"]},
+            {"name": "instruction_summary", "chunks": ["Give me", "a three-item robot safety checklist."]},
+            {"name": "factual_qa", "chunks": ["What is the capital", "of France?"]},
+            {"name": "reasoning", "chunks": ["A box has three red balls and two blue balls.", "How many balls are there?"]},
+            {"name": "context_recall", "chunks": ["The code word is amber.", "Repeat only the code word."]},
+            {"name": "format_following", "chunks": ["Answer with one word:", "is water wet?"]},
+            {"name": "architecture", "chunks": ["In one sentence,", "how does Propagator store context?"]},
+            {"name": "turn_policy_silence", "chunks": ["I am still speaking", "[SILENCE]", "[SILENCE]"]},
         ],
         separators=(",", ":"),
     )
     temperature: float = 0.7
     top_k: int = 50
 
-    write_rate: float = 0.1
-    forget_rate: float = 0.02
+    write_rate: float = 0.02
+    forget_rate: float = 0.002
     memory_l2: float = 1e-6
     remat_scan_step: bool = True
 
@@ -440,14 +455,16 @@ class PropagatorConfig(BaseSettings):
     validation_split: str = "train"
     validation_skip_rows: int | None = None
     dataset_trust_remote_code: bool = True
+    data_pack_count: int = 0
+    data_pack_index: int = 0
 
-    max_train_chunks: int = 1_000_000
-    max_val_chunks: int = 50_000
+    max_train_chunks: int = 0
+    max_val_chunks: int = 0
     max_train_rows: int | None = None
     max_val_rows: int | None = None
     streaming: bool = True
     cache_root: str = "outputs/cache"
-    cache_flush_every: int = 512
+    cache_flush_every: int = 4096
     cache_resume: bool = True
     cache_storage: str = "auto"
     cache_read_mode: str = "auto"
@@ -460,21 +477,26 @@ class PropagatorConfig(BaseSettings):
     audio_preprocessing_workers: int = 0
     text_preprocessing_chunk_size: int = 64
     audio_preprocessing_chunk_size: int = 2
+    text_preprocessing_batch_rows: int = 0
+    audio_preprocessing_batch_rows: int = 0
+    tokenize_start_method: str = "auto"
+    tokenize_imap_chunk_size: int = 0
+    tokenize_maxtasks_per_child: int = 0
 
     stateful_train: bool = True
     stateful_validation: bool = True
     validation_batches: int = 16
-    validation_control_batches: int = 4
+    validation_control_batches: int = 0
     same_split_validation_stride: int = 10
     same_split_validation_offset: int = 0
     synthetic_control_train_examples: int = 2048
     synthetic_control_val_examples: int = 512
-    synthetic_control_train_rate: float = 0.10
+    synthetic_control_train_rate: float = 0.05
     synthetic_interrupt_fraction: float = 0.60
 
     tokenizer_path: str = "assets/tokenizer-byte-bpe-16000.json"
     tokenizer_vocab_size: int = 16_000
-    tokenizer_train_rows: int = 200_000
+    tokenizer_train_rows: int = 0
     tokenizer_min_frequency: int = 2
     force_train_tokenizer: bool = False
     require_byte_level_bpe: bool = True
@@ -482,25 +504,28 @@ class PropagatorConfig(BaseSettings):
     precision: str = "bfloat16"
 
     enable_audio: bool = True
-    audio_backend: str = "encodec"
+    audio_backend: str = "mimi"
     audio_sample_rate: int = 24_000
     audio_codebooks: int = 8
-    audio_codebook_size: int = 1024
+    audio_codebook_size: int = 2048
+    mimi_repo: str = "kyutai/moshika-pytorch-bf16"
+    mimi_filename: str = "tokenizer-e351c8d8-checkpoint125.safetensors"
+    mimi_cache_dir: str | None = None
     max_audio_seconds: float = 4.0
-    max_audio_tokens_per_row: int = 2400
+    max_audio_tokens_per_row: int = 512
     audio_task_mix: str = '{"asr":0.25,"tts":0.35,"audio":0.20,"hybrid":0.20}'
     tts_prompt_template: str = "Say this aloud: {text}"
     audio_eval_prompt: str = "Say this aloud: hello, I am listening."
     audio_eval_prompts: str = json.dumps(
         [
-            "Say this aloud: hello, I am listening.",
-            "Say this aloud: I can hear you clearly.",
+            "Say this aloud: the code word is amber.",
+            "Read this number sequence aloud: two, seven, four.",
         ],
         separators=(",", ":"),
     )
     eval_audio_samples: int = 2
     eval_audio_every: int = 5_000
-    audio_frames_per_second: float = 75.0
+    audio_frames_per_second: float = 12.5
     eval_audio_seconds: float = 5.0
     eval_audio_tokens: int = 3000
     eval_audio_input_samples: int = 2
@@ -510,12 +535,12 @@ class PropagatorConfig(BaseSettings):
     audio_eval_normalize_rms: float = 0.06
     audio_eval_peak_limit: float = 0.95
     audio_low_rms_threshold: float = 0.005
-    audio_token_loss_weight: float = 2.0
-    audio_codebook_loss_weight: float = 3.0
-    audio_out_loss_weight: float = 8.0
-    audio_end_loss_weight: float = 8.0
-    output_modality_loss_weight: float = 4.0
-    audio_min_generation_seconds: float = 5.0
+    audio_token_loss_weight: float = 1.0
+    audio_codebook_loss_weight: float = 1.0
+    audio_out_loss_weight: float = 2.0
+    audio_end_loss_weight: float = 2.0
+    output_modality_loss_weight: float = 2.0
+    audio_min_generation_seconds: float = 1.0
     audio_min_generation_tokens: int = 256
     silence_short_tokens: int = 2
     silence_end_tokens: int = 4
@@ -523,16 +548,16 @@ class PropagatorConfig(BaseSettings):
     synthesize_turn_silence: bool = False
 
     inference_candidate_vocab_size: int = 8192
-    eval_use_candidate_head: bool = True
+    eval_use_candidate_head: bool = False
     eval_use_full_audio_head: bool = False
 
     optimizer: str = "adamw"
-    weight_decay: float = 1e-4
+    weight_decay: float = 0.01
     grad_clip_norm: float = 1.0
     label_smoothing: float = 0.0
 
     gcs_backup_dir: str | None = None
-    gcs_sync_every: int = 20_000
+    gcs_sync_every: int = 10_000
     gcs_backup_keep: int = 5
     gcs_async_backup: bool = True
     local_eval_keep: int = 8
@@ -607,7 +632,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-layers", type=int)
     parser.add_argument("--memory-key-size", type=int)
     parser.add_argument("--memory-value-size", type=int)
+    parser.add_argument("--associative-groups", type=int)
     parser.add_argument("--mlp-multiplier", type=int)
+    parser.add_argument("--use-swiglu", action="store_true")
+    parser.add_argument("--no-swiglu", action="store_true")
+    parser.add_argument("--moe-num-experts", type=int)
+    parser.add_argument("--moe-top-k", type=int)
+    parser.add_argument("--rope-base", type=float)
+    parser.add_argument("--rope-position-scale", type=float)
+    parser.add_argument("--rope-max-position", type=int)
 
     parser.add_argument("--train-unroll-len", type=int)
     parser.add_argument("--seq-len", type=int)
@@ -616,12 +649,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float)
     parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--epochs", type=int)
-    parser.add_argument("--max-train-steps", type=int)
+    parser.add_argument("--max-steps", type=int)
     parser.add_argument("--seed", type=int)
 
     parser.add_argument("--eval-every", type=int)
     parser.add_argument("--checkpoint-every", type=int)
     parser.add_argument("--train-log-every", type=int)
+    parser.add_argument("--early-stopping-patience", type=int)
+    parser.add_argument("--early-stopping-min-delta", type=float)
     parser.add_argument("--sample-gen-len", type=int)
     parser.add_argument("--sample-chunks", type=str)
     parser.add_argument("--eval-text-cases", type=str)
@@ -654,6 +689,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-skip-rows", type=int)
     parser.add_argument("--dataset-trust-remote-code", action="store_true")
     parser.add_argument("--no-dataset-trust-remote-code", action="store_true")
+    parser.add_argument("--data-pack-count", type=int)
+    parser.add_argument("--data-pack-index", type=int)
 
     parser.add_argument("--max-train-chunks", type=int)
     parser.add_argument("--max-val-chunks", type=int)
@@ -675,6 +712,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-preprocessing-workers", type=int)
     parser.add_argument("--text-preprocessing-chunk-size", type=int)
     parser.add_argument("--audio-preprocessing-chunk-size", type=int)
+    parser.add_argument("--text-preprocessing-batch-rows", type=int)
+    parser.add_argument("--audio-preprocessing-batch-rows", type=int)
+    parser.add_argument("--tokenize-start-method", type=str)
+    parser.add_argument("--tokenize-imap-chunk-size", type=int)
+    parser.add_argument("--tokenize-maxtasks-per-child", type=int)
 
     parser.add_argument("--stateful-train", action="store_true")
     parser.add_argument("--stateless-train", action="store_true")
@@ -701,10 +743,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--enable-audio", action="store_true")
     parser.add_argument("--no-audio", action="store_true")
-    parser.add_argument("--audio-backend", type=str, choices=["encodec", "none"])
+    parser.add_argument("--audio-backend", type=str, choices=["mimi", "encodec", "none"])
     parser.add_argument("--audio-sample-rate", type=int)
     parser.add_argument("--audio-codebooks", type=int)
     parser.add_argument("--audio-codebook-size", type=int)
+    parser.add_argument("--mimi-repo", type=str)
+    parser.add_argument("--mimi-filename", type=str)
+    parser.add_argument("--mimi-cache-dir", type=str)
     parser.add_argument("--max-audio-seconds", type=float)
     parser.add_argument("--max-audio-tokens-per-row", type=int)
     parser.add_argument("--audio-task-mix", type=str)
@@ -794,6 +839,8 @@ def build_config() -> PropagatorConfig:
         updates["synthesize_turn_silence"] = False
     if raw_updates.get("no_remat_scan_step"):
         updates["remat_scan_step"] = False
+    if raw_updates.get("no_swiglu"):
+        updates["use_swiglu"] = False
     if raw_updates.get("eval_use_full_head"):
         updates["eval_use_candidate_head"] = False
     if raw_updates.get("eval_use_full_audio_head"):
@@ -819,6 +866,7 @@ def build_config() -> PropagatorConfig:
         "no_audio",
         "no_synthesize_turn_silence",
         "no_remat_scan_step",
+        "no_swiglu",
         "eval_use_full_head",
         "eval_use_full_audio_head",
         "sync_backup_blocking",
@@ -831,6 +879,30 @@ def build_config() -> PropagatorConfig:
 
     cfg = base_config.model_copy(update=updates)
 
+    backend_updates: dict[str, Any] = {}
+    if cfg.audio_backend == "mimi":
+        if raw_updates.get("audio_codebook_size") is None:
+            backend_updates["audio_codebook_size"] = 2048
+        if raw_updates.get("audio_frames_per_second") is None:
+            backend_updates["audio_frames_per_second"] = 12.5
+        if raw_updates.get("max_audio_tokens_per_row") is None:
+            backend_updates["max_audio_tokens_per_row"] = 512
+    elif cfg.audio_backend == "encodec":
+        if raw_updates.get("audio_codebook_size") is None:
+            backend_updates["audio_codebook_size"] = 1024
+        if raw_updates.get("audio_frames_per_second") is None:
+            backend_updates["audio_frames_per_second"] = 75.0
+        if raw_updates.get("max_audio_tokens_per_row") is None:
+            backend_updates["max_audio_tokens_per_row"] = 2400
+    if backend_updates:
+        cfg = cfg.model_copy(update=backend_updates)
+    if cfg.enable_audio and int(cfg.audio_codebooks) != 8:
+        raise ValueError("The current frame model requires exactly 8 audio codebooks")
+    if cfg.audio_backend == "mimi" and int(cfg.audio_codebook_size) != 2048:
+        raise ValueError("Mimi requires --audio-codebook-size 2048")
+    if cfg.audio_backend == "encodec" and int(cfg.audio_codebook_size) != 1024:
+        raise ValueError("EnCodec 6 kbps requires --audio-codebook-size 1024")
+
     if cfg.seq_len is not None:
         cfg = cfg.model_copy(update={"train_unroll_len": cfg.seq_len})
     if cfg.max_train_rows is not None:
@@ -839,6 +911,23 @@ def build_config() -> PropagatorConfig:
         cfg = cfg.model_copy(update={"max_val_chunks": cfg.max_val_rows})
     if cfg.gcs_backup_dir is None and Path("/gcs").exists():
         cfg = cfg.model_copy(update={"gcs_backup_dir": str(Path("/gcs") / "propagator-backups" / TRAINING_RUN_NAME)})
+
+    groups = max(1, int(cfg.associative_groups))
+    if int(cfg.memory_key_size) % groups != 0:
+        raise ValueError("--memory-key-size must be divisible by --associative-groups")
+    if int(cfg.moe_num_experts) < 1:
+        raise ValueError("--moe-num-experts must be >= 1")
+    if int(cfg.moe_top_k) < 1:
+        raise ValueError("--moe-top-k must be >= 1")
+    cfg = cfg.model_copy(update={"tokenize_start_method": str(cfg.tokenize_start_method).lower().strip() or "auto"})
+    if str(cfg.tokenize_start_method) not in {"auto", "fork", "spawn", "forkserver"}:
+        raise ValueError("--tokenize-start-method must be one of: auto, fork, spawn, forkserver")
+    if int(cfg.data_pack_count) < 0:
+        raise ValueError("--data-pack-count must be >= 0")
+    if int(cfg.data_pack_count) == 1:
+        cfg = cfg.model_copy(update={"data_pack_count": 0, "data_pack_index": 0})
+    elif int(cfg.data_pack_count) > 1:
+        cfg = cfg.model_copy(update={"data_pack_index": int(cfg.data_pack_index) % int(cfg.data_pack_count)})
 
     seconds_updates: dict[str, int] = {}
     if raw_updates.get("eval_audio_tokens") is None:
@@ -996,6 +1085,42 @@ def dataset_partition_filter(row: Any, idx: int, stride: int, offset: int, keep_
     return is_validation_row if keep_validation else not is_validation_row
 
 
+def data_pack_filter(row: Any, idx: int, pack_count: int, pack_index: int) -> bool:
+    return (int(idx) % int(pack_count)) == int(pack_index)
+
+
+def active_data_pack() -> tuple[int, int] | None:
+    pack_count = int(config.data_pack_count)
+    if pack_count <= 1:
+        return None
+    pack_index = int(config.data_pack_index) % pack_count
+    return pack_count, pack_index
+
+
+def apply_data_pack_partition(dataset: Any, spec: dict[str, Any], split_name: str) -> Any:
+    pack = active_data_pack()
+    if pack is None:
+        return dataset
+    pack_count, pack_index = pack
+    log_info(
+        f"Applying staged data pack for {spec['name']} {split_name}: "
+        f"idx % {pack_count} == {pack_index}"
+    )
+    if not config.streaming and hasattr(dataset, "select"):
+        try:
+            length = len(dataset)
+            return dataset.select(range(pack_index, length, pack_count))
+        except Exception:
+            pass
+    if hasattr(dataset, "filter"):
+        return dataset.filter(
+            data_pack_filter,
+            with_indices=True,
+            fn_kwargs={"pack_count": pack_count, "pack_index": pack_index},
+        )
+    return dataset
+
+
 def apply_same_split_partition(dataset: Any, spec: dict[str, Any], split_name: str, split: str) -> Any:
     if config.validation_skip_rows is not None:
         return dataset
@@ -1047,7 +1172,6 @@ def dataset_fingerprint(specs: list[dict[str, Any]], split_name: str) -> str:
             "echox_subsets": spec.get("echox_subsets"),
             "max_shards": spec.get("max_shards"),
             "max_chunks": spec.get("max_chunks"),
-            "estimated_chunks": spec.get("estimated_chunks"),
             "part_rows": spec.get("part_rows"),
             "part_chunks": spec.get("part_chunks"),
             "debug_max_rows": spec.get("debug_max_rows"),
@@ -1056,6 +1180,8 @@ def dataset_fingerprint(specs: list[dict[str, Any]], split_name: str) -> str:
             "repeat": spec.get("repeat", 1),
             "same_split_validation_stride": config.same_split_validation_stride,
             "same_split_validation_offset": config.same_split_validation_offset,
+            "data_pack_count": config.data_pack_count,
+            "data_pack_index": config.data_pack_index,
         }
         for spec in specs
     ]
@@ -1087,14 +1213,17 @@ def source_dataset_fingerprint(spec: dict[str, Any], split_name: str) -> str:
         "streaming": spec.get("streaming"),
         "same_split_validation_stride": config.same_split_validation_stride,
         "same_split_validation_offset": config.same_split_validation_offset,
+        "data_pack_count": config.data_pack_count,
+        "data_pack_index": config.data_pack_index,
     }
     return json.dumps(serializable, ensure_ascii=False, sort_keys=True)
 
 
 def source_cache_prefix(spec: dict[str, Any], split_name: str, source_idx: int) -> Path:
+    preprocessing_protocol = "source_cache_staged_row_pack"
     sig_str = "|".join(
         [
-            "source_cache_v1",
+            preprocessing_protocol,
             ",".join(SPECIAL_TOKENS),
             source_dataset_fingerprint(spec, split_name),
             split_name,
@@ -1114,6 +1243,9 @@ def source_cache_prefix(spec: dict[str, Any], split_name: str, source_idx: int) 
             str(config.audio_backend),
             str(config.audio_codebooks),
             str(config.audio_codebook_size),
+            str(config.audio_frames_per_second),
+            str(config.mimi_repo),
+            str(config.mimi_filename),
             str(config.max_audio_seconds),
             str(config.max_audio_tokens_per_row),
             str(config.audio_task_mix),
@@ -1315,6 +1447,7 @@ def read_audio_bytes(audio_bytes: bytes) -> tuple[np.ndarray, int] | None:
 
 def iter_echox_tar_rows(spec: dict[str, Any]):
     max_wer = float(spec.get("max_wer", 0.25))
+    pack = active_data_pack()
     for shard_url in echox_shard_urls(spec):
         if not spec.get("suppress_worker_logs"):
             log_info(f"[EchoX] streaming shard {shard_url}")
@@ -1335,6 +1468,10 @@ def iter_echox_tar_rows(spec: dict[str, Any]):
                         raise DataQualityError(f"EchoX shard has unreadable data.json: {shard_url}")
                     examples = json.load(f)
                     for idx, example in enumerate(examples):
+                        if pack is not None:
+                            pack_count, pack_index = pack
+                            if idx % pack_count != pack_index:
+                                continue
                         paths = []
                         for turn in example.get("conversations", []):
                             path = turn.get("audio")
@@ -1442,7 +1579,9 @@ def iter_tokenizer_training_texts():
     produced = 0
     rows = 0
     specs = parse_dataset_mix()
-    per_spec_rows = max(1, math.ceil(config.tokenizer_train_rows / len(specs)))
+    row_limit = int(config.tokenizer_train_rows)
+    uncapped = row_limit <= 0
+    per_spec_rows = None if uncapped else max(1, math.ceil(row_limit / len(specs)))
 
     for spec in specs:
         split = split_for_dataset_spec(spec, "train")
@@ -1453,7 +1592,7 @@ def iter_tokenizer_training_texts():
             continue
 
         for row in progress_bar(ds, desc=f"Training tokenizer:{spec['name']}", total=per_spec_rows):
-            if rows >= config.tokenizer_train_rows:
+            if not uncapped and rows >= row_limit:
                 break
             rows += 1
 
@@ -1462,7 +1601,7 @@ def iter_tokenizer_training_texts():
                 if text:
                     produced += 1
                     yield text
-            if rows % per_spec_rows == 0:
+            if per_spec_rows is not None and rows % per_spec_rows == 0:
                 break
 
     if produced == 0:
@@ -1614,22 +1753,48 @@ def get_audio_codec() -> dict[str, Any] | None:
         return None
 
     try:
+        if config.audio_backend == "mimi":
+            import rustymimi
+            from huggingface_hub import hf_hub_download
+
+            model_path = os.environ.get("MIMI_MODEL_PATH", "").strip()
+            if not model_path:
+                cache_dir = config.mimi_cache_dir or os.environ.get("HF_HOME")
+                model_path = hf_hub_download(
+                    repo_id=config.mimi_repo,
+                    filename=config.mimi_filename,
+                    cache_dir=cache_dir,
+                )
+            model = rustymimi.Tokenizer(
+                model_path,
+                num_codebooks=int(config.audio_codebooks),
+                dtype="f32",
+            )
+            _audio_codec = {"backend": "mimi", "model": model, "model_path": model_path}
+            return _audio_codec
+
         import torch
         from encodec import EncodecModel
         from encodec.utils import convert_audio
 
-        # Restrict PyTorch to a single thread to prevent catastrophic contention with 128 multiprocessing workers
+        # Restrict PyTorch to a single thread to avoid contention across preprocessing workers.
         torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
 
         model = EncodecModel.encodec_model_24khz()
         model.set_target_bandwidth(6.0)
         model.eval()
-        _audio_codec = {"torch": torch, "model": model, "convert_audio": convert_audio}
+        _audio_codec = {"backend": "encodec", "torch": torch, "model": model, "convert_audio": convert_audio}
         return _audio_codec
     except Exception as exc:
         _audio_codec_error = f"{type(exc).__name__}: {exc}"
-        log_info(f"[Audio] EnCodec backend unavailable; audio rows/eval decode will be skipped: {_audio_codec_error}")
+        log_info(
+            f"[Audio] {config.audio_backend} backend unavailable; audio rows/eval decode will be skipped: "
+            f"{_audio_codec_error}"
+        )
         return None
 
 
@@ -1673,35 +1838,68 @@ def encode_audio_batch_to_token_ids(audios: list[tuple[np.ndarray, int] | None])
     if not valid_indices:
         return [[] for _ in audios]
 
-    torch = codec["torch"]
     model = codec["model"]
-    convert_audio = codec["convert_audio"]
 
-    wavs = []
-    for idx in valid_indices:
-        array, sr = normalized[idx]
-        wav = torch.from_numpy(array)
-        wav = convert_audio(wav, sr, config.audio_sample_rate, 1)
-        wavs.append(wav)
+    if codec["backend"] == "mimi":
+        import torch
+        import torchaudio.functional as audio_functional
 
-    max_len = max(int(wav.shape[-1]) for wav in wavs)
-    padded = []
-    for wav in wavs:
-        if int(wav.shape[-1]) < max_len:
-            wav = torch.nn.functional.pad(wav, (0, max_len - int(wav.shape[-1])))
-        padded.append(wav)
+        wavs_np: list[np.ndarray] = []
+        wav_lengths: list[int] = []
+        for idx in valid_indices:
+            array, sr = normalized[idx]
+            wav = torch.from_numpy(array)
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            if int(sr) != int(config.audio_sample_rate):
+                wav = audio_functional.resample(wav, int(sr), int(config.audio_sample_rate))
+            wav_np = np.ascontiguousarray(wav.numpy(), dtype=np.float32)
+            wavs_np.append(wav_np)
+            wav_lengths.append(int(wav_np.shape[-1]))
+
+        max_len = max(wav_lengths)
+        batch_np = np.zeros((len(wavs_np), 1, max_len), dtype=np.float32)
+        for local_idx, wav_np in enumerate(wavs_np):
+            batch_np[local_idx, :, : wav_np.shape[-1]] = wav_np
+
+        model.reset()
+        codes_np = np.asarray(model.encode(batch_np), dtype=np.int32)
+    else:
+        torch = codec["torch"]
+        convert_audio = codec["convert_audio"]
+
+        wavs = []
+        wav_lengths = []
+        for idx in valid_indices:
+            array, sr = normalized[idx]
+            wav = torch.from_numpy(array)
+            wav = convert_audio(wav, sr, config.audio_sample_rate, 1)
+            wavs.append(wav)
+            wav_lengths.append(int(wav.shape[-1]))
+
+        max_len = max(int(wav.shape[-1]) for wav in wavs)
+        padded = []
+        for wav in wavs:
+            if int(wav.shape[-1]) < max_len:
+                wav = torch.nn.functional.pad(wav, (0, max_len - int(wav.shape[-1])))
+            padded.append(wav)
+
+        with torch.no_grad():
+            batch = torch.stack(padded, dim=0)
+            encoded_frames = model.encode(batch)
+            if not encoded_frames:
+                return [[] for _ in audios]
+            codes = torch.cat([frame_codes for frame_codes, _ in encoded_frames], dim=-1)
+            codes_np = codes.detach().cpu().numpy().astype(np.int32)
 
     results: list[list[list[int]]] = [[] for _ in audios]
-    with torch.no_grad():
-        batch = torch.stack(padded, dim=0)
-        encoded_frames = model.encode(batch)
-        if not encoded_frames:
-            return results
-        codes = torch.cat([frame_codes for frame_codes, _ in encoded_frames], dim=-1)
-        codes_np = codes.detach().cpu().numpy().astype(np.int32)
-
+    total_frames = int(codes_np.shape[-1])
     for local_idx, original_idx in enumerate(valid_indices):
-        results[original_idx] = audio_codes_to_token_frames(codes_np[local_idx])
+        expected_frames = int(
+            math.ceil(wav_lengths[local_idx] * float(config.audio_frames_per_second) / float(config.audio_sample_rate))
+        )
+        expected_frames = max(1, min(total_frames, expected_frames))
+        results[original_idx] = audio_codes_to_token_frames(codes_np[local_idx, :, :expected_frames])
     return results
 
 
@@ -1744,13 +1942,18 @@ def decode_audio_token_ids_to_waveform(token_ids_: list[int]) -> tuple[np.ndarra
     if not frames:
         return np.zeros((config.audio_sample_rate,), dtype=np.float32), config.audio_sample_rate, "no_audio_tokens"
 
-    torch = codec["torch"]
     model = codec["model"]
-    codes_np = np.asarray(frames, dtype=np.int64).T[None, :, :]
-    with torch.no_grad():
-        codes = torch.from_numpy(codes_np)
-        wav = model.decode([(codes, None)])[0].squeeze(0).squeeze(0)
-    array = wav.detach().cpu().numpy().astype(np.float32)
+    if codec["backend"] == "mimi":
+        codes_np = np.ascontiguousarray(np.asarray(frames, dtype=np.uint32).T[None, :, :])
+        model.reset()
+        array = np.asarray(model.decode(codes_np), dtype=np.float32).squeeze(0).squeeze(0)
+    else:
+        torch = codec["torch"]
+        codes_np = np.asarray(frames, dtype=np.int64).T[None, :, :]
+        with torch.no_grad():
+            codes = torch.from_numpy(codes_np)
+            wav = model.decode([(codes, None)])[0].squeeze(0).squeeze(0)
+        array = wav.detach().cpu().numpy().astype(np.float32)
     return np.clip(array, -1.0, 1.0), config.audio_sample_rate, None
 
 
@@ -1883,13 +2086,22 @@ def pad_weights(values: list[float], length: int) -> list[float]:
 
 
 def read_duplex_events(row: dict) -> list[tuple[str, str, bool]]:
-    if "output" not in row:
-        raise KeyError("Duplex row must contain an output field")
+    raw_events = None
+    if isinstance(row.get("output"), list):
+        raw_events = row.get("output")
+    elif isinstance(row.get("messages"), list):
+        raw_events = row.get("messages")
+    elif isinstance(row.get("conversations"), list):
+        raw_events = row.get("conversations")
+    if raw_events is None:
+        raise DataQualityError("Duplex row has no supported conversation field")
 
     events = []
-    for event in row["output"]:
-        role = canonical_role(str(event.get("role", "")))
-        content = event.get("content", "")
+    for event in raw_events:
+        if not isinstance(event, dict):
+            continue
+        role = canonical_role(str(event.get("role", event.get("from", ""))))
+        content = event.get("content", event.get("value", ""))
         if content is None or role not in {"user", "assistant"}:
             continue
 
@@ -1900,6 +2112,8 @@ def read_duplex_events(row: dict) -> list[tuple[str, str, bool]]:
 
         events.append((role, content, is_idle))
 
+    if not events:
+        raise DataQualityError("Duplex row produced no usable conversation events")
     return events
 
 
@@ -2185,7 +2399,13 @@ def tokenize_plain_text(row: dict, spec: dict[str, Any] | None = None) -> tuple[
             break
     if not text:
         raise KeyError("Plain text row has no text field")
-    return tokenize_duplex({"output": [{"role": "user", "content": "Continue this stream."}, {"role": "assistant", "content": text}]})
+    text_ids = encode_text(text)
+    if len(text_ids) < 8:
+        raise DataQualityError("Plain text row is too short for continuation training")
+    context_len = min(384, max(4, int(round(len(text_ids) * 0.20))))
+    context_len = min(context_len, len(text_ids) - 4)
+    user_ids = [token_ids["text_in"], *text_ids[:context_len]]
+    return tokenize_modal_exchange(user_ids, text_output_ids(text_ids[context_len:]))
 
 
 def choose_audio_task(row: dict, transcript: str, spec: dict[str, Any] | None = None) -> str:
@@ -2449,6 +2669,50 @@ def _worker_tokenize_row(args):
     except Exception as e:
         log_info(f"[Worker] Unexpected exception in stream_id {stream_id}: {e}\n{traceback.format_exc()}", flush=True)
         return None
+
+
+def _worker_tokenize_row_batch(args):
+    rows, mode, spec, stream_id_start, unroll_len = args
+
+    # Ensure globals are initialized in case of spawn/forkserver context
+    global config, tokenizer, token_ids, text_vocab_size, vocab_size, audio_token_start, audio_token_end
+    if config is None:
+        config = build_config()
+        tokenizer = Tokenizer.from_file(config.tokenizer_path)
+        token_ids = ensure_special_tokens(tokenizer)
+        text_vocab_size = tokenizer.get_vocab_size()
+        vocab_size, audio_token_start, audio_token_end = compute_vocab_sizes(text_vocab_size)
+        init_global_token_ids()
+
+    row_count = 0
+    row_results: list[tuple[int, Any]] = []
+    stream_id = int(stream_id_start)
+
+    try:
+        for row in rows:
+            row_count += 1
+            try:
+                in_ids, tr_ids, row_weights, _ = tokenize_row_by_mode(row, mode, spec)
+                if len(in_ids) != len(tr_ids) or len(in_ids) != len(row_weights):
+                    row_results.append((stream_id, None))
+                    stream_id += 1
+                    continue
+                # We must call chunk_tokenized_stream inside the worker to keep it parallel.
+                chunks = chunk_tokenized_stream(in_ids, tr_ids, row_weights, unroll_len)
+                row_results.append((stream_id, chunks))
+            except DataQualityError:
+                # Quietly skip rows with missing/malformed data but keep row cardinality.
+                row_results.append((stream_id, None))
+            except Exception as e:
+                row_results.append((stream_id, None))
+                log_info(
+                    f"[Worker] Unexpected exception in stream_id {stream_id}: {e}\n{traceback.format_exc()}",
+                    flush=True,
+                )
+            stream_id += 1
+        return row_count, row_results
+    except Exception:
+        return 0, []
 
 
 def _split_kind(split_name: str) -> str:
@@ -2954,7 +3218,7 @@ def cache_prefix(split_name: str, max_chunks: int, split_spec: str, skip_rows: i
     specs = parse_dataset_mix()
     sig_str = "|".join(
         [
-            "multimodal_user_interrupt_stateful_v4",
+            "multimodal_user_interrupt_stateful_current",
             ",".join(SPECIAL_TOKENS),
             dataset_fingerprint(specs, split_name),
             split_name,
@@ -2977,6 +3241,9 @@ def cache_prefix(split_name: str, max_chunks: int, split_spec: str, skip_rows: i
             str(config.audio_backend),
             str(config.audio_codebooks),
             str(config.audio_codebook_size),
+            str(config.audio_frames_per_second),
+            str(config.mimi_repo),
+            str(config.mimi_filename),
             str(config.max_audio_seconds),
             str(config.max_audio_tokens_per_row),
             str(config.audio_task_mix),
@@ -3033,37 +3300,55 @@ def synthetic_control_rows(count: int, *, split_name: str) -> list[dict[str, Any
     if count <= 0:
         return []
 
-    user_prompts = [
-        "Can you explain this slowly?",
-        "Please summarize the safety checklist.",
-        "What is your name?",
-        "Tell me how the memory matrix works.",
-        "Give me a short answer.",
-        "Describe the audio pipeline.",
-        "Help me debug this training run.",
-        "What should I look at next?",
-    ]
-    assistant_parts = [
-        "Sure. I will start with the main point and keep it concise.",
-        "The important part is to separate the protocol decision from the content tokens.",
-        "Propagator is the model name, and it uses a recurrent matrix memory.",
-        "First, check the validation totals, then inspect the generated samples.",
-        "A stable run should keep checkpoints, logs, and metrics moving together.",
-        "The audio path uses codec tokens, so frame consistency matters.",
-    ]
-    interrupt_phrases = [
-        "Actually, make it shorter.",
-        "Wait, answer in one sentence.",
-        "Stop there and use simpler words.",
-        "New question: what changed?",
-        "Interrupting: focus on the metric.",
-        "Hold on, explain the risk first.",
-    ]
-    followups = [
-        "Thanks, continue.",
-        "Now give the next step.",
-        "That helps, be specific.",
-        "Can you compare the options?",
+    scenarios = [
+        {
+            "prompt": "What is your name?",
+            "response": "I'm Propagator.",
+            "interrupt": "What is your purpose?",
+            "revised": "I am a research model for streaming dialogue with fixed-size memory.",
+            "followup": "How do you store context?",
+            "followup_response": "I update a persistent associative memory matrix as the stream advances.",
+        },
+        {
+            "prompt": "Please summarize a robot safety checklist.",
+            "response": "Check the emergency stop, clear the work area, and verify guards before operation.",
+            "interrupt": "Make that shorter.",
+            "revised": "Check the stop, area, and guards.",
+            "followup": "What is the first item?",
+            "followup_response": "Check the emergency stop.",
+        },
+        {
+            "prompt": "Explain the memory matrix slowly.",
+            "response": "The model reads from a fixed-size matrix, then writes a small update after each token.",
+            "interrupt": "Use simpler words.",
+            "revised": "It keeps a small memory and updates it one token at a time.",
+            "followup": "Does it grow with the conversation?",
+            "followup_response": "No. Its shape stays fixed.",
+        },
+        {
+            "prompt": "What should I inspect in a failing training run?",
+            "response": "Inspect data examples, per-task validation metrics, generated samples, and gradient scale.",
+            "interrupt": "Focus on the data first.",
+            "revised": "Inspect raw rows, transformed tokens, masks, and source proportions first.",
+            "followup": "What comes after data checks?",
+            "followup_response": "Check per-task loss and generated outputs.",
+        },
+        {
+            "prompt": "Describe the audio pipeline.",
+            "response": "Audio is resampled, encoded into codec frames, and trained with one target per codebook.",
+            "interrupt": "Only explain the codec step.",
+            "revised": "The codec converts waveform segments into synchronized discrete codebook IDs.",
+            "followup": "Why must frames stay aligned?",
+            "followup_response": "All codebooks describe the same audio frame and must be predicted together.",
+        },
+        {
+            "prompt": "Give me a short answer: what is overfitting?",
+            "response": "Overfitting is learning the training examples without generalizing well to new ones.",
+            "interrupt": "One sentence only.",
+            "revised": "Overfitting is memorizing training patterns that do not generalize.",
+            "followup": "How can validation reveal it?",
+            "followup_response": "Training improves while held-out performance stalls or worsens.",
+        },
     ]
 
     rows: list[dict[str, Any]] = []
@@ -3071,17 +3356,16 @@ def synthetic_control_rows(count: int, *, split_name: str) -> list[dict[str, Any
     interrupt_count = int(round(count * interrupt_fraction))
     for idx in range(count):
         is_interrupt = idx < interrupt_count
-        prompt = user_prompts[idx % len(user_prompts)]
-        assistant = assistant_parts[(idx * 3) % len(assistant_parts)]
+        scenario = scenarios[idx % len(scenarios)]
         if is_interrupt:
             rows.append(
                 {
                     "allow_user_interrupts": True,
                     "output": [
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": assistant},
-                        {"role": "user", "content": interrupt_phrases[idx % len(interrupt_phrases)]},
-                        {"role": "assistant", "content": assistant_parts[(idx * 5 + 1) % len(assistant_parts)]},
+                        {"role": "user", "content": scenario["prompt"]},
+                        {"role": "assistant", "content": scenario["response"]},
+                        {"role": "user", "content": scenario["interrupt"]},
+                        {"role": "assistant", "content": scenario["revised"]},
                     ],
                 }
             )
@@ -3090,10 +3374,10 @@ def synthetic_control_rows(count: int, *, split_name: str) -> list[dict[str, Any
                 {
                     "allow_user_interrupts": False,
                     "output": [
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": assistant},
-                        {"role": "user", "content": followups[idx % len(followups)]},
-                        {"role": "assistant", "content": assistant_parts[(idx * 7 + 2) % len(assistant_parts)]},
+                        {"role": "user", "content": scenario["prompt"]},
+                        {"role": "assistant", "content": scenario["response"]},
+                        {"role": "user", "content": scenario["followup"]},
+                        {"role": "assistant", "content": scenario["followup_response"]},
                     ],
                 }
             )
@@ -3160,28 +3444,52 @@ def build_synthetic_control_chunks(
     )
 
 
-def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0):
+def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0, skip_log_label: str | None = None):
     """Retrying wrapper for dataset streaming to handle transient network errors."""
     import time
     for _ in range(repeat_count):
-        current_skip = skip_rows
+        consumed_rows = max(0, int(skip_rows))
         max_retries = 10
         retry_delay = 5.0
 
         attempt = 0
         while attempt < max_retries:
             try:
-                # If we need to skip rows, apply it every retry to resume from correct position
                 active_ds = dataset
-                if current_skip > 0:
-                    if hasattr(active_ds, "skip"):
-                        active_ds = active_ds.skip(current_skip)
-                    elif hasattr(active_ds, "select"):
-                        active_ds = active_ds.select(range(current_skip, len(active_ds)))
+                skip_target = int(consumed_rows)
+                manual_skip = skip_target > 0
+                if skip_target > 0 and hasattr(active_ds, "skip"):
+                    active_ds = active_ds.skip(skip_target)
+                    manual_skip = False
+                elif skip_target > 0 and not config.streaming and hasattr(active_ds, "select"):
+                    active_ds = active_ds.select(range(skip_target, len(active_ds)))
+                    manual_skip = False
+
+                skipped = 0
+                last_skip_log = time.time()
+                skip_started = last_skip_log
+                label = skip_log_label or "dataset"
+                if manual_skip:
+                    log_info(f"[Dataset:{label}] resume_skip start rows={skip_target}")
 
                 for row in active_ds:
+                    if manual_skip and skipped < skip_target:
+                        skipped += 1
+                        now = time.time()
+                        if now - last_skip_log >= 30.0 or skipped == skip_target:
+                            elapsed = max(1e-6, now - skip_started)
+                            rows_per_sec = skipped / elapsed
+                            remaining = max(0, skip_target - skipped)
+                            eta = remaining / max(1e-6, rows_per_sec)
+                            log_info(
+                                f"[Dataset:{label}] resume_skip rows={skipped}/{skip_target} "
+                                f"({100.0 * skipped / max(1, skip_target):.1f}%), "
+                                f"rows_per_sec={rows_per_sec:.2f}, eta={format_duration(eta)}"
+                            )
+                            last_skip_log = now
+                        continue
                     yield row
-                    current_skip += 1
+                    consumed_rows += 1
 
                 # If we finished the loop successfully, break the retry while
                 break
@@ -3196,6 +3504,30 @@ def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0):
 
         # Reset skip_rows for the next repeat cycle
         skip_rows = 0
+
+
+def _tokenization_mp_context() -> tuple[multiprocessing.context.BaseContext, str]:
+    requested = str(getattr(config, "tokenize_start_method", "auto") if config is not None else "auto").lower()
+    if requested not in {"auto", "fork", "spawn", "forkserver"}:
+        requested = "auto"
+
+    fallback = "spawn"
+    if requested == "auto":
+        if os.name == "nt":
+            requested = "spawn"
+        else:
+            requested = "fork"
+
+    try:
+        ctx = multiprocessing.get_context(requested)
+    except ValueError:
+        if requested != fallback:
+            log_info(f"[Tokenize] Multiprocessing start method '{requested}' unavailable; falling back to '{fallback}'.")
+            ctx = multiprocessing.get_context(fallback)
+            requested = fallback
+        else:
+            raise
+    return ctx, requested
 
 
 def token_cache_bytes_per_chunk(unroll_len: int) -> int:
@@ -3327,6 +3659,33 @@ def truncate_disk_token_cache(cache_path: Path, num_chunks: int, unroll_len: int
                 f.truncate(target_size)
 
 
+def initial_uncapped_chunk_capacity(spec: dict[str, Any] | None, dataset: Any | None = None) -> int:
+    if spec and spec.get("estimated_chunks"):
+        estimated = int(spec["estimated_chunks"])
+        pack = active_data_pack()
+        if pack is not None:
+            pack_count, _ = pack
+            estimated = max(1, math.ceil(estimated / max(1, pack_count)))
+        return max(1, estimated)
+    row_count = 0
+    if dataset is not None:
+        try:
+            row_count = len(dataset)
+        except Exception:
+            row_count = 0
+    repeat_count = max(1, int(spec.get("repeat", 1))) if spec else 1
+    mode = str(spec.get("mode", config.dataset_mode)) if spec else str(config.dataset_mode)
+    if row_count > 0:
+        if mode in {"audio_asr", "echox_s2s_dialogue", "speech_dialogue"} or "audio" in mode:
+            chunks_per_row = max(1, math.ceil(int(config.max_audio_tokens_per_row) / max(1, int(config.train_unroll_len))))
+        elif mode == "plain_text":
+            chunks_per_row = 32
+        else:
+            chunks_per_row = 8
+        return max(1024, int(row_count) * repeat_count * chunks_per_row)
+    return 65_536
+
+
 def flush_token_cache_arrays(*arrays: np.ndarray) -> None:
     for array in arrays:
         flush = getattr(array, "flush", None)
@@ -3342,8 +3701,17 @@ def tokenize_echox_dataset_sharded(
     stream_offset: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     unroll_len = config.train_unroll_len
+    uncapped = int(max_chunks) <= 0
     split = split_for_dataset_spec(spec, _split_kind(split_name))
     shard_urls = echox_shard_urls(spec)
+    original_shard_count = len(shard_urls)
+    pack = active_data_pack()
+    if pack is not None:
+        pack_count, pack_index = pack
+        log_info(
+            f"Applying staged EchoX row pack for {spec['name']} {split_name}: "
+            f"row_idx % {pack_count} == {pack_index}, shards={len(shard_urls)}/{original_shard_count}"
+        )
     if not shard_urls:
         raise RuntimeError("EchoX sharded tokenizer found no tar.gz shards")
 
@@ -3364,14 +3732,58 @@ def tokenize_echox_dataset_sharded(
     shard_dir = cache_path.parent / f"{cache_path.name}.echox_shards"
     shard_dir.mkdir(parents=True, exist_ok=True)
     estimated_chunks = int(spec.get("estimated_chunks", 0)) if spec.get("estimated_chunks") else 0
-    cache_storage = choose_token_cache_storage(cache_path, max_chunks, unroll_len, resume=False)
+    if estimated_chunks > 0 and pack is not None:
+        pack_count, _ = pack
+        estimated_chunks = max(1, math.ceil(estimated_chunks / max(1, pack_count)))
+    allocation_chunks = max(1, estimated_chunks) if uncapped and estimated_chunks > 0 else (
+        initial_uncapped_chunk_capacity(spec) if uncapped else max_chunks
+    )
+    cache_storage = choose_token_cache_storage(cache_path, allocation_chunks, unroll_len, resume=False)
     input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions = allocate_token_cache_arrays(
         cache_path,
-        max_chunks,
+        allocation_chunks,
         unroll_len,
         cache_storage,
         "w+",
     )
+
+    def ensure_merge_capacity(required_chunks: int) -> None:
+        nonlocal allocation_chunks, input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
+        if required_chunks <= allocation_chunks:
+            return
+        new_capacity = max(required_chunks, max(allocation_chunks * 2, allocation_chunks + 1024))
+        log_info(f"[Cache] Expanding merge cache for {split_name}: {allocation_chunks} -> {new_capacity} chunks")
+        if cache_storage == "memory":
+            new_input = np.empty((new_capacity, unroll_len, 8), dtype=np.int32)
+            new_target = np.empty((new_capacity, unroll_len, 8), dtype=np.int32)
+            new_weight = np.empty((new_capacity, unroll_len), dtype=np.float32)
+            new_stream = np.empty((new_capacity,), dtype=np.int64)
+            new_pos = np.empty((new_capacity,), dtype=np.int32)
+            if actual_count:
+                new_input[:actual_count] = input_tokens[:actual_count]
+                new_target[:actual_count] = target_tokens[:actual_count]
+                new_weight[:actual_count] = loss_weights[:actual_count]
+                new_stream[:actual_count] = stream_ids[:actual_count]
+                new_pos[:actual_count] = chunk_positions[:actual_count]
+            input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions = (
+                new_input,
+                new_target,
+                new_weight,
+                new_stream,
+                new_pos,
+            )
+        else:
+            flush_token_cache_arrays(input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions)
+            del input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
+            truncate_disk_token_cache(cache_path, new_capacity, unroll_len)
+            input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions = allocate_token_cache_arrays(
+                cache_path,
+                new_capacity,
+                unroll_len,
+                "disk",
+                "r+",
+            )
+        allocation_chunks = new_capacity
 
     cached_manifests: list[dict[str, Any]] = []
     partial_shard_states: dict[int, dict[str, Any]] = {}
@@ -3439,19 +3851,22 @@ def tokenize_echox_dataset_sharded(
         new_rows = max(0, total_rows - baseline_main_log_rows)
         chunks_per_sec = new_chunks / elapsed
         rows_per_sec = new_rows / elapsed
-        if estimated_chunks > 0:
-            remaining = max(0, estimated_chunks - total_chunks)
-            effective_rate = recent_chunks_per_sec if recent_chunks_per_sec > 0 else chunks_per_sec
+        progress_total = estimated_chunks if uncapped else (min(estimated_chunks, max_chunks) if estimated_chunks > 0 else max_chunks)
+        if progress_total > 0:
+            remaining = max(0, progress_total - total_chunks)
+            effective_rate = recent_chunks_per_sec
             eta_text = format_duration(remaining / effective_rate) if effective_rate > 0 else "unknown"
-            progress = (
-                f"chunks={total_chunks}, est_total={estimated_chunks} "
-                f"({100.0 * total_chunks / max(1, estimated_chunks):.1f}%), target_chunks={max_chunks}"
-            )
+            if uncapped:
+                progress = f"chunks={total_chunks}/{progress_total} ({100.0 * total_chunks / max(1, progress_total):.1f}%)"
+            else:
+                progress = (
+                    f"chunks={total_chunks}/{progress_total} "
+                    f"({100.0 * total_chunks / max(1, progress_total):.1f}%), "
+                    f"target_chunks={max_chunks}"
+                )
         else:
-            remaining = max(0, max_chunks - total_chunks)
-            effective_rate = recent_chunks_per_sec if recent_chunks_per_sec > 0 else chunks_per_sec
-            eta_text = format_duration(remaining / effective_rate) if effective_rate > 0 else "unknown"
-            progress = f"chunks={total_chunks}/{max_chunks} ({100.0 * total_chunks / max(1, max_chunks):.1f}%)"
+            eta_text = "unknown"
+            progress = f"chunks={total_chunks}"
         log_info(
             f"[EchoX main:{split_name}] shards={done_shards}/{len(shard_urls)}, active={active_shards}, "
             f"parts={total_parts}, rows={total_rows}, resume_scan={total_scan_rows}/{baseline_main_log_rows}, "
@@ -3468,7 +3883,8 @@ def tokenize_echox_dataset_sharded(
     if tasks:
         import queue as queue_module
 
-        ctx = multiprocessing.get_context("spawn")
+        ctx, mp_method = _tokenization_mp_context()
+        log_info(f"[EchoX] multiprocessing method={mp_method}, maxtasks_per_child={max(0, int(config.tokenize_maxtasks_per_child or 0))}")
         manager = multiprocessing.Manager()
         progress_queue = manager.Queue()
         for task in tasks:
@@ -3536,7 +3952,10 @@ def tokenize_echox_dataset_sharded(
             return drained
 
         async_results = []
-        pool = ctx.Pool(processes=num_workers)
+        pool = ctx.Pool(
+            processes=num_workers,
+            maxtasksperchild=max(0, int(config.tokenize_maxtasks_per_child or 0)) or None,
+        )
         _ACTIVE_POOLS.append(pool)
         try:
             for task in tasks:
@@ -3609,10 +4028,14 @@ def tokenize_echox_dataset_sharded(
             entry_chunks = int(entry.get("num_chunks", 0))
             if entry_chunks <= 0:
                 continue
-            take = min(entry_chunks, max_chunks - actual_count)
-            if take <= 0:
-                truncated = True
-                break
+            if uncapped:
+                take = entry_chunks
+                ensure_merge_capacity(actual_count + take)
+            else:
+                take = min(entry_chunks, max_chunks - actual_count)
+                if take <= 0:
+                    truncated = True
+                    break
             prefix = str(entry["prefix"])
             input_tokens[actual_count : actual_count + take] = np.load(prefix + ".input.npy", mmap_mode="r")[:take]
             target_tokens[actual_count : actual_count + take] = np.load(prefix + ".target.npy", mmap_mode="r")[:take]
@@ -3620,7 +4043,7 @@ def tokenize_echox_dataset_sharded(
             stream_ids[actual_count : actual_count + take] = np.load(prefix + ".stream_id.npy", mmap_mode="r")[:take]
             chunk_positions[actual_count : actual_count + take] = np.load(prefix + ".chunk_pos.npy", mmap_mode="r")[:take]
             actual_count += take
-            if take < entry_chunks:
+            if not uncapped and take < entry_chunks:
                 truncated = True
                 break
         source_rows += int(manifest.get("source_rows", 0))
@@ -3641,7 +4064,7 @@ def tokenize_echox_dataset_sharded(
         "dataset_config": spec.get("config"),
         "dataset_mode": spec.get("mode"),
         "repeat": 1,
-        "protocol": "multimodal_user_interrupt_stateful_v4_echox_sharded_v1",
+        "protocol": "multimodal_user_interrupt_stateful_echox_sharded",
         "special_tokens": SPECIAL_TOKENS,
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
@@ -3685,12 +4108,17 @@ def tokenize_dataset_rows(
     unroll_len = config.train_unroll_len
     row_mode = mode or config.dataset_mode
     repeat_count = max(1, int(spec.get("repeat", 1))) if spec else 1
-    log_info(f"Tokenizing {split_name}: mode={row_mode}, max_chunks={max_chunks}, train_unroll_len={unroll_len}")
+    uncapped = int(max_chunks) <= 0
+    log_info(f"Tokenizing {split_name}: mode={row_mode}, train_unroll_len={unroll_len}")
     if row_mode == "echox_s2s_dialogue" and repeat_count == 1 and spec:
         return tokenize_echox_dataset_sharded(split_name, cache_path, max_chunks, spec, stream_offset)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path = Path(str(cache_path) + ".progress.json")
     estimated_chunks = int(spec.get("estimated_chunks", 0)) if spec and spec.get("estimated_chunks") else 0
+    pack = active_data_pack()
+    if estimated_chunks > 0 and pack is not None:
+        pack_count, _ = pack
+        estimated_chunks = max(1, math.ceil(estimated_chunks / max(1, pack_count)))
 
     actual_count = 0
     source_rows = 0
@@ -3714,15 +4142,17 @@ def tokenize_dataset_rows(
             log_info(f"Ignoring invalid cache progress {progress_path}: {exc}")
 
     mmap_mode = "r+" if resume else "w+"
-    effective_max_chunks = max_chunks
-    if resume and actual_count > max_chunks:
+    effective_max_chunks = initial_uncapped_chunk_capacity(spec, dataset) if uncapped else max_chunks
+    if resume and not uncapped and actual_count > max_chunks:
         effective_max_chunks = actual_count
         log_info(
             f"[Tokenize:{split_name}] Resume cache has {actual_count} chunks above target_chunks={max_chunks}; "
             "keeping the existing cache size."
         )
+    if resume and uncapped:
+        effective_max_chunks = max(effective_max_chunks, actual_count + max(1024, actual_count))
     cache_storage = choose_token_cache_storage(cache_path, effective_max_chunks, unroll_len, resume)
-    if resume and cache_storage == "disk" and actual_count >= max_chunks:
+    if resume and not uncapped and cache_storage == "disk" and actual_count >= max_chunks:
         log_info(
             f"[Tokenize:{split_name}] Resume cache already reached target_chunks={max_chunks}; "
             f"finalizing existing chunks={actual_count} without truncating."
@@ -3738,7 +4168,7 @@ def tokenize_dataset_rows(
             "dataset_config": spec.get("config") if spec else None,
             "dataset_mode": row_mode,
             "repeat": repeat_count,
-            "protocol": "multimodal_user_interrupt_stateful_v4",
+            "protocol": "multimodal_user_interrupt_stateful",
             "special_tokens": SPECIAL_TOKENS,
             "text_vocab_size": text_vocab_size,
             "audio_token_start": audio_token_start,
@@ -3763,11 +4193,43 @@ def tokenize_dataset_rows(
 
     pad_id = token_ids["pad"]
 
-    if repeat_count == 1 and source_rows > 0:
-        if hasattr(dataset, "skip"):
-            dataset = dataset.skip(source_rows)
-        elif not config.streaming and hasattr(dataset, "select"):
-            dataset = dataset.select(range(source_rows, len(dataset)))
+    def ensure_token_capacity(required_chunks: int) -> None:
+        nonlocal effective_max_chunks, input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
+        if required_chunks <= effective_max_chunks:
+            return
+        new_capacity = max(required_chunks, max(effective_max_chunks * 2, effective_max_chunks + 1024))
+        log_info(f"[Cache] Expanding token cache for {split_name}: {effective_max_chunks} -> {new_capacity} chunks")
+        if cache_storage == "memory":
+            new_input = np.empty((new_capacity, unroll_len, 8), dtype=np.int32)
+            new_target = np.empty((new_capacity, unroll_len, 8), dtype=np.int32)
+            new_weight = np.empty((new_capacity, unroll_len), dtype=np.float32)
+            new_stream = np.empty((new_capacity,), dtype=np.int64)
+            new_pos = np.empty((new_capacity,), dtype=np.int32)
+            if actual_count:
+                new_input[:actual_count] = input_tokens[:actual_count]
+                new_target[:actual_count] = target_tokens[:actual_count]
+                new_weight[:actual_count] = loss_weights[:actual_count]
+                new_stream[:actual_count] = stream_ids[:actual_count]
+                new_pos[:actual_count] = chunk_positions[:actual_count]
+            input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions = (
+                new_input,
+                new_target,
+                new_weight,
+                new_stream,
+                new_pos,
+            )
+        else:
+            flush_token_cache_arrays(input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions)
+            del input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
+            truncate_disk_token_cache(cache_path, new_capacity, unroll_len)
+            input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions = allocate_token_cache_arrays(
+                cache_path,
+                new_capacity,
+                unroll_len,
+                "disk",
+                "r+",
+            )
+        effective_max_chunks = new_capacity
 
     def flush_progress() -> None:
         aggregate_stats["source_rows"] = source_rows
@@ -3793,7 +4255,11 @@ def tokenize_dataset_rows(
     is_audio = "audio" in row_mode or row_mode in {"audio_asr", "echox_s2s_dialogue", "speech_dialogue"}
     if is_audio:
         num_workers = config.audio_preprocessing_workers or min(cpu_count, 32)
-        chunk_size = config.audio_preprocessing_chunk_size
+        row_batch_size = max(1, int(config.audio_preprocessing_batch_rows)) if int(config.audio_preprocessing_batch_rows) > 0 else max(
+            1,
+            int(config.audio_preprocessing_chunk_size),
+        )
+        chunk_size = max(1, int(config.audio_preprocessing_chunk_size))
         if row_mode == "echox_s2s_dialogue" and num_workers > 64:
             log_info(
                 f"[Tokenize:{split_name}] Limiting EchoX audio workers from {num_workers} to 64; "
@@ -3802,46 +4268,82 @@ def tokenize_dataset_rows(
             num_workers = 64
     else:
         num_workers = config.text_preprocessing_workers or min(cpu_count, 48)
-        chunk_size = config.text_preprocessing_chunk_size
+        row_batch_size = max(1, int(config.text_preprocessing_batch_rows)) if int(config.text_preprocessing_batch_rows) > 0 else max(
+            1,
+            int(config.text_preprocessing_chunk_size),
+        )
+        chunk_size = max(1, min(128, int(config.text_preprocessing_chunk_size)))
 
     log_info(
         f"Starting parallel tokenization for {split_name} with {num_workers} workers "
-        f"(chunk_size={chunk_size}, cpu_count={cpu_count}, is_audio={is_audio})"
+        f"(batch_size={row_batch_size}, chunk_size={chunk_size}, cpu_count={cpu_count}, is_audio={is_audio})"
     )
 
-    ctx = multiprocessing.get_context("spawn")
-    pool = ctx.Pool(processes=num_workers)
+    ctx, mp_method = _tokenization_mp_context()
+    log_info(
+        f"[Tokenize] multiprocessing method={mp_method}, imap_chunk_size={int(config.tokenize_imap_chunk_size or 0)} "
+        f"maxtasks_per_child={max(0, int(config.tokenize_maxtasks_per_child or 0))}"
+    )
+
+    pool = ctx.Pool(
+        processes=num_workers,
+        maxtasksperchild=max(0, int(config.tokenize_maxtasks_per_child or 0)) or None,
+    )
+    env_imap = int(config.tokenize_imap_chunk_size or 0)
+    if env_imap > 0:
+        imap_chunk_size = max(1, env_imap)
+    else:
+        imap_chunk_size = max(1, min(16, row_batch_size))
     stop_early = False
     pool_completed = False
+    display_progress_total = int(estimated_chunks) if int(estimated_chunks) > 0 else max(1, int(effective_max_chunks))
     try:
         # Prepare an iterator for the pool
         base_source_rows = source_rows
 
         def _row_gen_impl():
-            emitted = 0
+            batch: list[Any] = []
+            next_stream_id = stream_offset + base_source_rows
+            batch_stream_id = next_stream_id
             # Use safe_dataset_iter to handle HF streaming network errors
-            for row in safe_dataset_iter(dataset, repeat_count=repeat_count, skip_rows=base_source_rows):
-                yield (row, row_mode, spec, stream_offset + base_source_rows + emitted, unroll_len)
-                emitted += 1
+            for row in safe_dataset_iter(
+                dataset,
+                repeat_count=repeat_count,
+                skip_rows=base_source_rows,
+                skip_log_label=split_name,
+            ):
+                if not batch:
+                    batch_stream_id = next_stream_id
+                batch.append(row)
+                next_stream_id += 1
+                if len(batch) >= row_batch_size:
+                    yield (batch, row_mode, spec, batch_stream_id, unroll_len)
+                    batch = []
+            if batch:
+                yield (batch, row_mode, spec, batch_stream_id, unroll_len)
+
         row_gen = _row_gen_impl()
 
         # Use line-based periodic logs for parallel tokenization; interactive bars
         # get misleading when resumed worker progress races with main-process state.
         pbar = progress_bar(
             desc=f"Tokenizing {split_name}",
-            total=effective_max_chunks,
+            total=None if uncapped else effective_max_chunks,
             initial=actual_count,
             disable=True,
         )
         last_log_time = time.time()
         last_log_rows = source_rows
         last_log_chunks = actual_count
-        for result in pool.imap_unordered(_worker_tokenize_row, row_gen, chunksize=chunk_size):
-            if actual_count >= effective_max_chunks:
+        for result in pool.imap_unordered(_worker_tokenize_row_batch, row_gen, chunksize=imap_chunk_size):
+            if not uncapped and actual_count >= effective_max_chunks:
                 # We need to signal the pool to stop if possible, but imap is lazy
                 break
 
-            source_rows += 1
+            if not isinstance(result, tuple) or len(result) != 2:
+                continue
+            batch_rows, row_results = result
+            source_rows += int(batch_rows)
 
             # Periodic print for log visibility without exploding long-running logs.
             now = time.time()
@@ -3850,66 +4352,84 @@ def tokenize_dataset_rows(
                 elapsed = max(1e-6, now - last_log_time)
                 rows_per_sec = (source_rows - last_log_rows) / elapsed
                 chunks_per_sec = (actual_count - last_log_chunks) / elapsed
-                if estimated_chunks > 0:
-                    progress_pct = 100.0 * actual_count / max(1, estimated_chunks)
-                    remaining_chunks = max(0, estimated_chunks - int(actual_count))
-                    eta = remaining_chunks / max(1e-6, chunks_per_sec)
-                    progress_text = (
-                        f"chunks={actual_count}, est_total={estimated_chunks} ({progress_pct:.1f}%), "
-                        f"target_chunks={effective_max_chunks}"
-                    )
+                if not uncapped and estimated_chunks > 0:
+                    progress_total = min(estimated_chunks, effective_max_chunks)
                 else:
-                    progress_pct = 100.0 * actual_count / max(1, int(effective_max_chunks))
-                    remaining_chunks = max(0, int(effective_max_chunks) - int(actual_count))
+                    if uncapped and source_rows >= display_progress_total:
+                        display_progress_total = max(
+                            int(display_progress_total * 2),
+                            int(effective_max_chunks),
+                        )
+                    progress_total = max(1, int(display_progress_total))
+                if progress_total > 0:
+                    progress_pct = 100.0 * actual_count / max(1, int(progress_total))
+                    remaining_chunks = max(0, int(progress_total) - int(actual_count))
                     eta = remaining_chunks / max(1e-6, chunks_per_sec)
-                    progress_text = f"chunks={actual_count}/{effective_max_chunks} ({progress_pct:.1f}%)"
+                    if uncapped:
+                        progress_text = f"chunks={actual_count}/{int(progress_total)} ({progress_pct:.1f}%)"
+                    else:
+                        progress_text = (
+                            f"chunks={actual_count}/{int(progress_total)} ({progress_pct:.1f}%), "
+                            f"target_chunks={effective_max_chunks}"
+                        )
+                else:
+                    eta = 0.0
+                    progress_text = f"chunks={actual_count}"
+                eta_text = (
+                    format_duration(eta) if progress_total > 0 and chunks_per_sec > 0 else "running"
+                )
                 log_info(
                     f"[Tokenize:{split_name}] rows={source_rows}, {progress_text}, "
                     f"rows_per_sec={rows_per_sec:.2f}, chunks_per_sec={chunks_per_sec:.2f}, "
-                    f"eta={format_duration(eta)}"
+                    f"eta={eta_text}"
                 )
                 last_log_time = now
                 last_log_rows = source_rows
                 last_log_chunks = actual_count
 
-            if result is None:
+            if not row_results:
                 aggregate_stats["errors"] += 1
                 continue
 
-            stream_id, chunks = result
-            if not chunks:
-                aggregate_stats["skipped_chunks"] += 1
-                continue
-
             added_chunks = 0
-            for chunk_pos, (chunk_in, chunk_tr, chunk_w, chunk_stats) in enumerate(chunks):
-                if actual_count >= effective_max_chunks:
-                    break
+            for stream_id, chunks in row_results:
+                if chunks is None:
+                    aggregate_stats["errors"] += 1
+                    continue
+                if not chunks:
+                    aggregate_stats["skipped_chunks"] += 1
+                    continue
 
-                input_tokens[actual_count] = np.asarray(pad_to_len(chunk_in, unroll_len, pad_id), dtype=np.int32)
-                target_tokens[actual_count] = np.asarray(pad_to_len(chunk_tr, unroll_len, pad_id), dtype=np.int32)
-                loss_weights[actual_count] = np.asarray(pad_weights(chunk_w, unroll_len), dtype=np.float32)
-                stream_ids[actual_count] = stream_id
-                chunk_positions[actual_count] = chunk_pos
+                for chunk_pos, (chunk_in, chunk_tr, chunk_w, chunk_stats) in enumerate(chunks):
+                    if not uncapped and actual_count >= effective_max_chunks:
+                        break
+                    if uncapped:
+                        ensure_token_capacity(actual_count + 1)
 
-                for key in (
-                    "listen",
-                    "user_end",
-                    "model_end",
-                    "interrupt",
-                    "audio",
-                    "audio_out",
-                    "audio_end",
-                    "text_out",
-                    "hybrid_out",
-                    "content",
-                    "control",
-                    "ignored",
-                ):
-                    aggregate_stats[key] += int(chunk_stats[key])
+                    input_tokens[actual_count] = np.asarray(pad_to_len(chunk_in, unroll_len, pad_id), dtype=np.int32)
+                    target_tokens[actual_count] = np.asarray(pad_to_len(chunk_tr, unroll_len, pad_id), dtype=np.int32)
+                    loss_weights[actual_count] = np.asarray(pad_weights(chunk_w, unroll_len), dtype=np.float32)
+                    stream_ids[actual_count] = stream_id
+                    chunk_positions[actual_count] = chunk_pos
 
-                actual_count += 1
-                added_chunks += 1
+                    for key in (
+                        "listen",
+                        "user_end",
+                        "model_end",
+                        "interrupt",
+                        "audio",
+                        "audio_out",
+                        "audio_end",
+                        "text_out",
+                        "hybrid_out",
+                        "content",
+                        "control",
+                        "ignored",
+                    ):
+                        aggregate_stats[key] += int(chunk_stats[key])
+
+                    actual_count += 1
+                    added_chunks += 1
 
             if added_chunks > 0:
                 pbar.update(added_chunks)
@@ -3917,7 +4437,7 @@ def tokenize_dataset_rows(
 
             if source_rows % max(1, int(config.cache_flush_every)) == 0:
                 flush_progress()
-            if actual_count >= effective_max_chunks:
+            if not uncapped and actual_count >= effective_max_chunks:
                 log_info(f"[Tokenize:{split_name}] Reached target_chunks={effective_max_chunks}; closing worker pool after in-flight rows.")
                 stop_early = True
                 break
@@ -3945,7 +4465,7 @@ def tokenize_dataset_rows(
         "dataset_config": spec.get("config") if spec else None,
         "dataset_mode": row_mode,
         "repeat": repeat_count,
-        "protocol": "multimodal_user_interrupt_stateful_v4",
+        "protocol": "multimodal_user_interrupt_stateful",
         "special_tokens": SPECIAL_TOKENS,
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
@@ -3995,13 +4515,6 @@ def load_cache_or_tokenize(
 
         return open_tokenized_cache(cp, num_rows, unroll_len)
 
-    if split_name == "train" and max_chunks <= 0:
-        raise RuntimeError(
-            f"Training cache is missing at {cp}.meta.json and max_train_chunks=0 would infer a "
-            "storage-capacity-based cap. Refusing to build a new capped training cache implicitly; "
-            "restore the current run cache or set MAX_TRAIN_CHUNKS deliberately for a new run."
-        )
-
     specs = parse_dataset_mix()
     if len(specs) > 1 or (config.dataset_mix or "").strip():
         return tokenize_mixed_dataset_rows(specs, split_name, cp, max_chunks)
@@ -4009,6 +4522,7 @@ def load_cache_or_tokenize(
     spec = specs[0]
     ds = load_dataset_from_spec(spec, ds_split)
     ds = apply_same_split_partition(ds, spec, split_name, ds_split)
+    ds = apply_data_pack_partition(ds, spec, split_name)
 
     if skip_rows > 0:
         if not config.streaming and hasattr(ds, "select"):
@@ -4085,12 +4599,15 @@ def find_legacy_mixed_source_cache(
     return candidates[0][1]
 
 
+def infer_cache_chunk_capacity() -> int:
+    free_bytes = available_memory_bytes() if (config.cache_storage or "auto") == "memory" else free_disk_bytes(cache_root_path())
+    reserve_bytes = 32 * 1024**3 if (config.cache_storage or "auto") == "memory" else 8 * 1024**3
+    return max(1, int((free_bytes - reserve_bytes) // token_cache_bytes_per_chunk(config.train_unroll_len)))
+
+
 def component_chunk_targets(specs: list[dict[str, Any]], max_chunks: int) -> list[int]:
     if max_chunks <= 0:
-        free_bytes = available_memory_bytes() if (config.cache_storage or "auto") == "memory" else free_disk_bytes(cache_root_path())
-        reserve_bytes = 32 * 1024**3 if (config.cache_storage or "auto") == "memory" else 8 * 1024**3
-        max_chunks = max(1, int((free_bytes - reserve_bytes) // token_cache_bytes_per_chunk(config.train_unroll_len)))
-        log_info(f"[Cache] Distributing inferred capacity of {max_chunks} chunks among datasets")
+        return [-1 for _ in specs]
 
     raw = [max_chunks * float(spec["weight"]) for spec in specs]
     targets = [int(math.floor(value)) for value in raw]
@@ -4116,7 +4633,7 @@ def tokenize_mixed_dataset_rows(
     component_meta = []
 
     for source_idx, (spec, target_chunks) in enumerate(zip(specs, source_targets, strict=True)):
-        if target_chunks <= 0:
+        if target_chunks == 0:
             continue
         split = split_for_dataset_spec(spec, split_name)
         source_cp = source_cache_prefix(spec, split_name, source_idx)
@@ -4138,7 +4655,7 @@ def tokenize_mixed_dataset_rows(
                 meta = json.load(f)
             num_rows = int(meta.get("num_chunks", meta["num_rows"]))
             data = open_tokenized_cache(source_cp, num_rows, config.train_unroll_len)
-            if num_rows > target_chunks:
+            if target_chunks > 0 and num_rows > target_chunks:
                 log_info(
                     f"[Cache] Reusing source cache above target without truncation: source={source_idx}:{spec['name']} "
                     f"cached_chunks={num_rows}, target_chunks={target_chunks}, path={source_cp.name}"
@@ -4151,6 +4668,7 @@ def tokenize_mixed_dataset_rows(
                 continue
 
             ds = apply_same_split_partition(ds, spec, split_name, split)
+            ds = apply_data_pack_partition(ds, spec, split_name)
 
             if split_name == "val" and split == spec.get("split") and target_chunks > 0 and config.validation_skip_rows is not None:
                 if config.validation_skip_rows is not None:
@@ -4171,14 +4689,19 @@ def tokenize_mixed_dataset_rows(
                 stream_offset=(source_idx + 1) * 1_000_000_000,
             )
 
-        rows = len(data[0])
+        rows = len(data[0]) if target_chunks < 0 else min(len(data[0]), int(target_chunks))
         if rows == 0:
             log_info(f"Dataset source produced zero chunks: {spec['name']} mode={spec.get('mode')}")
             continue
-        components.append((spec, data))
+        if target_chunks > 0 and rows < len(data[0]):
+            log_info(
+                f"[Cache] Truncating source to configured mix target: source={source_idx}:{spec['name']} "
+                f"cached_chunks={len(data[0])}, selected_chunks={rows}"
+            )
+        components.append((spec, data, rows))
         component_meta.append({"name": spec["name"], "mode": spec.get("mode"), "chunks": rows, "target_chunks": target_chunks})
 
-    total_rows = sum(len(data[0]) for _, data in components)
+    total_rows = sum(rows for _, _, rows in components)
     if total_rows == 0:
         raise RuntimeError(f"No chunks were tokenized for mixed {split_name}")
 
@@ -4194,14 +4717,13 @@ def tokenize_mixed_dataset_rows(
     )
 
     cursor = 0
-    for _, data in components:
+    for _, data, rows in components:
         src_inputs, src_targets, src_weights, src_stream_ids, src_chunk_positions = data
-        rows = len(src_inputs)
-        inputs[cursor : cursor + rows] = src_inputs[:]
-        targets[cursor : cursor + rows] = src_targets[:]
-        weights[cursor : cursor + rows] = src_weights[:]
-        stream_ids[cursor : cursor + rows] = src_stream_ids[:]
-        chunk_positions[cursor : cursor + rows] = src_chunk_positions[:]
+        inputs[cursor : cursor + rows] = src_inputs[:rows]
+        targets[cursor : cursor + rows] = src_targets[:rows]
+        weights[cursor : cursor + rows] = src_weights[:rows]
+        stream_ids[cursor : cursor + rows] = src_stream_ids[:rows]
+        chunk_positions[cursor : cursor + rows] = src_chunk_positions[:rows]
         cursor += rows
 
     flush_token_cache_arrays(inputs, targets, weights, stream_ids, chunk_positions)
@@ -4210,7 +4732,7 @@ def tokenize_mixed_dataset_rows(
         "num_rows": total_rows,
         "num_chunks": total_rows,
         "train_unroll_len": unroll_len,
-        "protocol": "multimodal_user_interrupt_stateful_v4",
+        "protocol": "multimodal_user_interrupt_stateful",
         "components": component_meta,
         "special_tokens": SPECIAL_TOKENS,
         "text_vocab_size": text_vocab_size,
@@ -4300,6 +4822,33 @@ def rms_norm(x: jax.Array) -> jax.Array:
     return (x_f32 * jax.lax.rsqrt(ms + 1e-6)).astype(x.dtype)
 
 
+def apply_grouped_rope(keys: jax.Array, positions: jax.Array, base: float, position_scale: float) -> jax.Array:
+    group_key_size = int(keys.shape[-1])
+    rotary_dim = (group_key_size // 2) * 2
+    if rotary_dim < 2:
+        return keys
+
+    x_rot = keys[..., :rotary_dim].astype(jnp.float32)
+    x_tail = keys[..., rotary_dim:]
+    half = rotary_dim // 2
+    x_even = x_rot[..., :half]
+    x_odd = x_rot[..., half:]
+
+    inv_freq = jnp.power(
+        jnp.asarray(base, dtype=jnp.float32),
+        -jnp.arange(0, half, dtype=jnp.float32) / max(1, half),
+    )
+    scaled_pos = positions.astype(jnp.float32) / max(1.0, float(position_scale))
+    angles = scaled_pos[:, None, None] * inv_freq[None, None, :]
+    cos = jnp.cos(angles)
+    sin = jnp.sin(angles)
+
+    rotated = jnp.concatenate([x_even * cos - x_odd * sin, x_even * sin + x_odd * cos], axis=-1)
+    if x_tail.shape[-1] == 0:
+        return rotated.astype(keys.dtype)
+    return jnp.concatenate([rotated, x_tail], axis=-1).astype(keys.dtype)
+
+
 def compute_vocab_sizes(text_size: int) -> tuple[int, int, int]:
     if not config.enable_audio:
         return text_size, text_size, text_size
@@ -4335,6 +4884,9 @@ class PropagatorBlock(nnx.Module):
     def __init__(self, cfg: PropagatorConfig, rngs: nnx.Rngs):
         self.cfg = cfg
         std = 1.0 / jnp.sqrt(cfg.hidden_size)
+        self.groups = max(1, int(cfg.associative_groups))
+        if int(cfg.memory_key_size) % self.groups != 0:
+            raise ValueError("memory_key_size must be divisible by associative_groups")
 
         self.read_key_proj = nnx.Linear(
             cfg.hidden_size,
@@ -4372,43 +4924,101 @@ class PropagatorBlock(nnx.Module):
         self.norm2 = nnx.RMSNorm(cfg.hidden_size, rngs=rngs)
         self.norm3 = nnx.RMSNorm(cfg.hidden_size, rngs=rngs)
 
-        self.fc1 = nnx.Linear(cfg.hidden_size, cfg.mlp_multiplier * cfg.hidden_size, rngs=rngs)
-        self.fc2 = nnx.Linear(cfg.mlp_multiplier * cfg.hidden_size, cfg.hidden_size, rngs=rngs)
+        mlp_hidden_size = cfg.mlp_multiplier * cfg.hidden_size
+        self.moe_num_experts = max(1, int(cfg.moe_num_experts))
+        self.moe_top_k = max(1, min(int(cfg.moe_top_k), self.moe_num_experts))
+        if self.moe_num_experts > 1:
+            self.router = nnx.Linear(cfg.hidden_size, self.moe_num_experts, rngs=rngs)
+            self.expert_fc1 = [nnx.Linear(cfg.hidden_size, mlp_hidden_size, rngs=rngs) for _ in range(self.moe_num_experts)]
+            self.expert_fc2 = [nnx.Linear(mlp_hidden_size, cfg.hidden_size, rngs=rngs) for _ in range(self.moe_num_experts)]
+            if cfg.use_swiglu:
+                self.expert_gate = [nnx.Linear(cfg.hidden_size, mlp_hidden_size, rngs=rngs) for _ in range(self.moe_num_experts)]
+            else:
+                self.expert_gate = []
+        else:
+            self.fc1 = nnx.Linear(cfg.hidden_size, mlp_hidden_size, rngs=rngs)
+            self.fc2 = nnx.Linear(mlp_hidden_size, cfg.hidden_size, rngs=rngs)
+            if cfg.use_swiglu:
+                self.fc_gate = nnx.Linear(cfg.hidden_size, mlp_hidden_size, rngs=rngs)
 
         self.gamma1 = nnx.Param(jnp.ones((cfg.hidden_size,)) * 0.1)
         self.gamma2 = nnx.Param(jnp.ones((cfg.hidden_size,)) * 0.1)
 
-    def __call__(self, x: jax.Array, memory: jax.Array, valid: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def grouped_key(self, key: jax.Array, positions: jax.Array, scale: jax.Array) -> jax.Array:
+        batch_size = key.shape[0]
+        group_key_size = int(self.cfg.memory_key_size) // self.groups
+        key = key.reshape((batch_size, self.groups, group_key_size))
+        key = apply_grouped_rope(key, positions, self.cfg.rope_base, self.cfg.rope_position_scale)
+        return (rms_norm(key) * scale).astype(jnp.float32)
+
+    def mlp(self, x: jax.Array) -> jax.Array:
+        dtype = model_dtype()
+        if self.moe_num_experts <= 1:
+            up = self.fc1(x)
+            if self.cfg.use_swiglu:
+                hidden = jax.nn.silu(up) * self.fc_gate(x)
+            else:
+                hidden = jax.nn.silu(up)
+            return self.fc2(hidden.astype(dtype))
+
+        expert_outputs = []
+        for idx in range(self.moe_num_experts):
+            up = self.expert_fc1[idx](x)
+            if self.cfg.use_swiglu:
+                hidden = jax.nn.silu(up) * self.expert_gate[idx](x)
+            else:
+                hidden = jax.nn.silu(up)
+            expert_outputs.append(self.expert_fc2[idx](hidden.astype(dtype)))
+        stacked = jnp.stack(expert_outputs, axis=1).astype(dtype)
+
+        router_logits = self.router(x).astype(jnp.float32)
+        if self.moe_top_k < self.moe_num_experts:
+            top_values, top_indices = jax.lax.top_k(router_logits, self.moe_top_k)
+            top_weights = jax.nn.softmax(top_values, axis=-1)
+            dispatch = jnp.zeros_like(router_logits)
+            dispatch = dispatch.at[jnp.arange(router_logits.shape[0])[:, None], top_indices].set(top_weights)
+        else:
+            dispatch = jax.nn.softmax(router_logits, axis=-1)
+        return jnp.einsum("be,beh->bh", dispatch.astype(dtype), stacked)
+
+    def __call__(
+        self,
+        x: jax.Array,
+        memory: jax.Array,
+        valid: jax.Array,
+        positions: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
         dtype = model_dtype()
         x = x.astype(dtype)
         memory_f32 = memory.astype(jnp.float32)
 
-        scale = jax.lax.rsqrt(jnp.asarray(self.cfg.memory_key_size, dtype=jnp.float32))
+        group_key_size = int(self.cfg.memory_key_size) // self.groups
+        scale = jax.lax.rsqrt(jnp.asarray(group_key_size, dtype=jnp.float32))
+        memory_grouped = memory_f32.reshape((memory_f32.shape[0], self.groups, group_key_size, self.cfg.memory_value_size))
 
         h = self.norm1(x).astype(dtype)
-        read_key = (rms_norm(self.read_key_proj(h)) * scale).astype(jnp.float32)
+        read_key = self.grouped_key(self.read_key_proj(h), positions, scale)
         if read_key.ndim == 3:
-            read_key = jnp.squeeze(read_key, 1)
+            read_key = read_key
 
-        read_value = jnp.einsum("bkv,bk->bv", memory_f32, read_key).astype(dtype)
+        read_value = jnp.mean(jnp.einsum("bgkv,bgk->bgv", memory_grouped, read_key), axis=1).astype(dtype)
         x = x + (self.gamma1[...] * self.read_proj(read_value)).astype(dtype)
 
         mlp_in = self.norm2(x).astype(dtype)
-        mlp_hidden = jax.nn.silu(self.fc1(mlp_in)).astype(dtype)
-        x = x + (self.gamma2[...] * self.fc2(mlp_hidden)).astype(dtype)
+        x = x + (self.gamma2[...] * self.mlp(mlp_in)).astype(dtype)
 
         w = self.norm3(x).astype(dtype)
 
-        write_key = (rms_norm(self.write_key_proj(w)) * scale).astype(jnp.float32)
+        write_key = self.grouped_key(self.write_key_proj(w), positions, scale)
         if write_key.ndim == 3:
-            write_key = jnp.squeeze(write_key, 1)
+            write_key = write_key
 
         write_value = jnp.tanh(self.write_value_proj(w)).astype(jnp.float32)
         if write_value.ndim == 3:
             write_value = jnp.squeeze(write_value, 1)
 
-        value_hat = jnp.einsum("bkv,bk->bv", memory_f32, write_key)
-        err = jnp.clip(write_value - value_hat, -1.0, 1.0)
+        value_hat = jnp.einsum("bgkv,bgk->bgv", memory_grouped, write_key)
+        err = jnp.clip(write_value[:, None, :] - value_hat, -1.0, 1.0)
 
         eta = jax.nn.sigmoid(self.write_gate(w)).astype(jnp.float32) * self.cfg.write_rate
         if eta.ndim == 3:
@@ -4418,7 +5028,7 @@ class PropagatorBlock(nnx.Module):
         if forget.ndim == 3:
             forget = jnp.squeeze(forget, 1)
 
-        update = jnp.einsum("bk,bv->bkv", write_key, err)
+        update = jnp.einsum("bgk,bgv->bgkv", write_key, err).reshape(memory_f32.shape)
         new_memory = (1.0 - forget[:, :, None]) * memory_f32 + eta[:, :, None] * update
         new_memory = jnp.clip(new_memory, -10.0, 10.0)
 
@@ -4455,16 +5065,21 @@ class PropagatorModel(nnx.Module):
         token_ids_: jax.Array,
         memories: tuple[jax.Array, ...],
         valid: jax.Array,
+        positions: jax.Array | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
+        if positions is None:
+            positions = jnp.zeros((token_ids_.shape[0],), dtype=jnp.int32)
+        positions = jnp.minimum(positions.astype(jnp.int32), int(self.cfg.rope_max_position))
         embeddings = self.token_emb(token_ids_)
         if embeddings.ndim == 3:
             mask = (token_ids_ != token_ids_pad)[..., None]
-            x = jnp.sum(embeddings * mask, axis=1)
+            active = jnp.sum(mask.astype(jnp.float32), axis=1)
+            x = jnp.sum(embeddings * mask, axis=1) * jax.lax.rsqrt(jnp.maximum(active, 1.0))
         else:
             x = embeddings
         next_memories = []
         for block, memory in zip(self.blocks, memories, strict=True):
-            x, next_memory = block(x, memory, valid)
+            x, next_memory = block(x, memory, valid, positions)
             next_memories.append(next_memory)
         x = self.norm(x)
         return x.astype(jnp.float32), tuple(next_memories)
@@ -4476,13 +5091,40 @@ class PropagatorModel(nnx.Module):
         candidate_embeddings = self.token_emb.embedding[candidate_ids]
         return (hidden @ candidate_embeddings.T).astype(jnp.float32)
 
+    def project_audio_aux_head(
+        self,
+        depth_state: jax.Array,
+        previous_token_ids: jax.Array,
+        aux_index: jax.Array | int,
+    ) -> tuple[jax.Array, jax.Array]:
+        previous_embeddings = self.token_emb(previous_token_ids).astype(jnp.float32)
+        next_depth_state = rms_norm(depth_state.astype(jnp.float32) + previous_embeddings)
+        codebook_size = int(self.cfg.audio_codebook_size)
+        kernel = self.audio_aux_heads.kernel[...].reshape((self.cfg.hidden_size, 7, codebook_size))
+        bias = self.audio_aux_heads.bias[...].reshape((7, codebook_size))
+        head_kernel = jax.lax.dynamic_index_in_dim(kernel, aux_index, axis=1, keepdims=False)
+        head_bias = jax.lax.dynamic_index_in_dim(bias, aux_index, axis=0, keepdims=False)
+        logits = next_depth_state @ head_kernel + head_bias
+        return logits.astype(jnp.float32), next_depth_state
+
+    def project_audio_aux_teacher(self, hidden: jax.Array, target_frame: jax.Array) -> jax.Array:
+        depth_state = hidden
+        previous_token_ids = target_frame[:, 0]
+        logits_by_codebook = []
+        for aux_index in range(7):
+            logits, depth_state = self.project_audio_aux_head(depth_state, previous_token_ids, aux_index)
+            logits_by_codebook.append(logits)
+            previous_token_ids = target_frame[:, aux_index + 1]
+        return jnp.stack(logits_by_codebook, axis=1)
+
     def step(
         self,
         token_ids_: jax.Array,
         memories: tuple[jax.Array, ...],
         valid: jax.Array,
+        positions: jax.Array | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-        hidden, next_memories = self.step_hidden(token_ids_, memories, valid)
+        hidden, next_memories = self.step_hidden(token_ids_, memories, valid, positions)
         return self.project_full(hidden), next_memories
 
     def step_candidates(
@@ -4491,8 +5133,9 @@ class PropagatorModel(nnx.Module):
         memories: tuple[jax.Array, ...],
         valid: jax.Array,
         candidate_ids: jax.Array,
+        positions: jax.Array | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-        hidden, next_memories = self.step_hidden(token_ids_, memories, valid)
+        hidden, next_memories = self.step_hidden(token_ids_, memories, valid, positions)
         return self.project_candidates(hidden, candidate_ids), next_memories
 
     def forward_with_memories(
@@ -4502,26 +5145,45 @@ class PropagatorModel(nnx.Module):
         loss_weights: jax.Array,
         init_memories: tuple[jax.Array, ...],
         reset_mask: jax.Array,
+        chunk_positions: jax.Array | None = None,
         task_ids: jax.Array | None = None,
         compute_metrics: bool = True,
     ) -> tuple[jax.Array, jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]]:
         input_mask = inputs[..., 0] != token_ids_pad if inputs.ndim == 3 else inputs != token_ids_pad
         memories = self.reset_memories(init_memories, reset_mask)
+        if chunk_positions is None:
+            chunk_positions = jnp.zeros((inputs.shape[0],), dtype=jnp.int32)
+        step_positions = (
+            chunk_positions.astype(jnp.int32)[:, None] * int(self.cfg.train_unroll_len)
+            + jnp.arange(inputs.shape[1], dtype=jnp.int32)[None, :]
+        )
 
         smooth = jnp.asarray(self.cfg.label_smoothing, dtype=jnp.float32)
 
         def scan_step_plain(carry, step_inputs):
-            step_in, step_target, step_weight, step_valid = step_inputs
+            step_in, step_target, step_weight, step_valid, step_position = step_inputs
 
-            hidden, next_carry = self.step_hidden(step_in, carry, step_valid)
+            hidden, next_carry = self.step_hidden(step_in, carry, step_valid, step_position)
             step_logits = self.project_full(hidden)
 
             main_target = step_target[:, 0] if step_target.ndim == 2 else step_target
 
-            log_probs = jax.nn.log_softmax(step_logits, axis=-1)
-            nll = -jnp.take_along_axis(log_probs, main_target[..., None], axis=-1).squeeze(-1)
+            text_logits = step_logits[:, :text_vocab_size]
+            text_log_probs = jax.nn.log_softmax(text_logits, axis=-1)
+            text_targets = jnp.clip(main_target, 0, text_vocab_size - 1)
+            text_nll = -jnp.take_along_axis(text_log_probs, text_targets[..., None], axis=-1).squeeze(-1)
+            q0_start = int(audio_token_start)
+            q0_end = q0_start + int(self.cfg.audio_codebook_size)
+            is_audio_main_target = jnp.logical_and(main_target >= q0_start, main_target < q0_end)
+            q0_logits = step_logits[:, q0_start:q0_end]
+            q0_log_probs = jax.nn.log_softmax(q0_logits, axis=-1)
+            q0_targets_rel = jnp.clip(main_target - q0_start, 0, int(self.cfg.audio_codebook_size) - 1)
+            q0_nll = -jnp.take_along_axis(q0_log_probs, q0_targets_rel[..., None], axis=-1).squeeze(-1)
+            nll = jnp.where(is_audio_main_target, q0_nll, text_nll)
             if float(self.cfg.label_smoothing) > 0.0:
-                smooth_loss = -jnp.mean(log_probs, axis=-1)
+                text_smooth_loss = -jnp.mean(text_log_probs, axis=-1)
+                q0_smooth_loss = -jnp.mean(q0_log_probs, axis=-1)
+                smooth_loss = jnp.where(is_audio_main_target, q0_smooth_loss, text_smooth_loss)
                 mixed_nll = (1.0 - smooth) * nll + smooth * smooth_loss
             else:
                 mixed_nll = nll
@@ -4535,9 +5197,7 @@ class PropagatorModel(nnx.Module):
             aux_frame_mask = jnp.zeros_like(step_weight, dtype=jnp.bool_)
 
             if step_target.ndim == 2:
-                aux_logits = self.audio_aux_heads(hidden) # (batch, 7 * audio_codebook_size)
-                batch_sz = hidden.shape[0]
-                aux_logits = aux_logits.reshape((batch_sz, 7, int(self.cfg.audio_codebook_size)))
+                aux_logits = self.project_audio_aux_teacher(hidden, step_target)
 
                 aux_targets = step_target[:, 1:8] # (batch, 7)
                 is_audio_aux = jnp.logical_and(aux_targets >= audio_token_start, aux_targets < audio_token_end)
@@ -4550,19 +5210,24 @@ class PropagatorModel(nnx.Module):
                 aux_nll = -jnp.take_along_axis(aux_log_probs, aux_targets_rel[..., None], axis=-1).squeeze(-1)
 
                 aux_nll_masked = aux_nll * is_audio_aux.astype(jnp.float32)
-                total_aux_nll = jnp.mean(aux_nll_masked, axis=1) * 7.0 # Sum over active heads
+                aux_counts = jnp.sum(is_audio_aux.astype(jnp.float32), axis=1)
+                total_aux_nll = jnp.sum(aux_nll_masked, axis=1) / jnp.maximum(1.0, aux_counts)
 
                 if compute_metrics:
                     aux_preds = jnp.argmax(aux_logits, axis=-1).astype(jnp.int32)
                     aux_correct = jnp.logical_and(is_audio_aux, aux_preds == aux_targets_rel)
-                    aux_counts = jnp.sum(is_audio_aux.astype(jnp.float32), axis=1)
                     aux_token_correct = jnp.sum(aux_correct.astype(jnp.float32), axis=1)
                     aux_token_total = aux_counts
                     aux_frame_mask = aux_counts > 0.0
                     audio_codebook_correct = jnp.logical_and(aux_frame_mask, aux_token_correct == aux_counts)
 
+            combined_loss = weighted_nll + total_aux_nll * float(self.cfg.audio_codebook_loss_weight) * step_weight
+            combined_weight = step_weight
+
             if compute_metrics:
-                pred = jnp.argmax(step_logits, axis=-1).astype(jnp.int32)
+                text_pred = jnp.argmax(text_logits, axis=-1).astype(jnp.int32)
+                q0_pred = jnp.argmax(q0_logits, axis=-1).astype(jnp.int32) + q0_start
+                pred = jnp.where(is_audio_main_target, q0_pred, text_pred)
                 supervised = step_weight > 0.0
                 correct = jnp.logical_and(supervised, pred == main_target)
 
@@ -4628,18 +5293,19 @@ class PropagatorModel(nnx.Module):
                 # Task separation (0: Text, 1: ASR, 2: TTS, 3: Duplex)
                 task_correct = jnp.zeros(4, dtype=jnp.float32)
                 task_total = jnp.zeros(4, dtype=jnp.float32)
+                task_loss_sum = jnp.zeros(4, dtype=jnp.float32)
+                task_weight_sum = jnp.zeros(4, dtype=jnp.float32)
                 if task_ids is not None:
                     token_correct = jnp.logical_and(correct, jnp.logical_or(text_mask, audio_mask)).astype(jnp.float32)
                     token_total = jnp.logical_or(text_mask, audio_mask).astype(jnp.float32)
                     task_correct = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_correct, 0.0)))(jnp.arange(4))
                     task_total = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_total, 0.0)))(jnp.arange(4))
+                    task_loss_sum = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, combined_loss, 0.0)))(jnp.arange(4))
+                    task_weight_sum = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, combined_weight, 0.0)))(jnp.arange(4))
 
-                metrics = metrics + tuple(task_correct) + tuple(task_total)
+                metrics = metrics + tuple(task_correct) + tuple(task_total) + tuple(task_loss_sum) + tuple(task_weight_sum)
             else:
                 metrics = tuple(jnp.zeros((), dtype=jnp.float32) for _ in range(VALIDATION_METRIC_SIZE))
-
-            combined_loss = weighted_nll + total_aux_nll * float(self.cfg.audio_codebook_loss_weight) * step_weight
-            combined_weight = step_weight
 
             return next_carry, (combined_loss, combined_weight, metrics)
 
@@ -4648,7 +5314,13 @@ class PropagatorModel(nnx.Module):
         final_memories, (step_losses, step_weights, metrics_t) = jax.lax.scan(
             scan_step,
             memories,
-            (jnp.swapaxes(inputs, 0, 1), jnp.swapaxes(targets, 0, 1), loss_weights.T, input_mask.T),
+            (
+                jnp.swapaxes(inputs, 0, 1),
+                jnp.swapaxes(targets, 0, 1),
+                loss_weights.T,
+                input_mask.T,
+                step_positions.T,
+            ),
         )
 
         ce_loss = jnp.sum(step_losses) / jnp.maximum(1.0, jnp.sum(step_weights))
@@ -4698,6 +5370,7 @@ def train_step_stateful(
     weights: jax.Array,
     memories: tuple[jax.Array, ...],
     reset_mask: jax.Array,
+    chunk_positions: jax.Array,
 ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
     def compute_loss(m):
         total_loss, ce_loss, final_memories, _ = m.forward_with_memories(
@@ -4706,6 +5379,7 @@ def train_step_stateful(
             weights,
             memories,
             reset_mask,
+            chunk_positions=chunk_positions,
             compute_metrics=False,
         )
         return total_loss, (ce_loss, final_memories)
@@ -4723,6 +5397,7 @@ def validation_step_stateful(
     weights: jax.Array,
     memories: tuple[jax.Array, ...],
     reset_mask: jax.Array,
+    chunk_positions: jax.Array,
     task_ids: jax.Array,
 ) -> tuple[jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]]:
     _, ce_loss, final_memories, metrics = model.forward_with_memories(
@@ -4731,6 +5406,7 @@ def validation_step_stateful(
         weights,
         memories,
         reset_mask,
+        chunk_positions=chunk_positions,
         task_ids=task_ids,
     )
     return ce_loss, final_memories, metrics
@@ -4742,8 +5418,9 @@ def runtime_step_full(
     input_id: jax.Array,
     memories: tuple[jax.Array, ...],
     valid: jax.Array,
+    positions: jax.Array,
 ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-    return model.step(input_id, memories, valid)
+    return model.step(input_id, memories, valid, positions)
 
 
 @nnx.jit
@@ -4753,8 +5430,22 @@ def runtime_step_candidates(
     memories: tuple[jax.Array, ...],
     valid: jax.Array,
     candidate_ids: jax.Array,
+    positions: jax.Array,
 ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-    return model.step_candidates(input_id, memories, valid, candidate_ids)
+    return model.step_candidates(input_id, memories, valid, candidate_ids, positions)
+
+
+@nnx.jit
+def runtime_audio_frame_step(
+    model: PropagatorModel,
+    input_frame: jax.Array,
+    memories: tuple[jax.Array, ...],
+    valid: jax.Array,
+    q0_candidate_ids: jax.Array,
+    positions: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array, tuple[jax.Array, ...]]:
+    hidden, next_memories = model.step_hidden(input_frame, memories, valid, positions)
+    return model.project_candidates(hidden, q0_candidate_ids), hidden, next_memories
 
 
 @nnx.jit
@@ -4768,10 +5459,17 @@ def prefill_stream_candidates(
     memories = model.initial_memories(batch_size)
 
     def scan_step(carry, step_inputs):
-        step_logits, next_carry = model.step_candidates(step_inputs[0], carry, step_inputs[1], candidate_ids)
+        step_logits, next_carry = model.step_candidates(
+            step_inputs[0],
+            carry,
+            step_inputs[1],
+            candidate_ids,
+            step_inputs[2],
+        )
         return next_carry, step_logits
 
-    final_memories, logits_t = jax.lax.scan(scan_step, memories, (input_ids.T, token_mask.T))
+    positions = jnp.broadcast_to(jnp.arange(input_ids.shape[1], dtype=jnp.int32)[:, None], input_ids.T.shape)
+    final_memories, logits_t = jax.lax.scan(scan_step, memories, (input_ids.T, token_mask.T, positions))
     return logits_t[-1], final_memories
 
 
@@ -4782,10 +5480,11 @@ def prefill_stream_full(model: PropagatorModel, input_ids: jax.Array) -> tuple[j
     memories = model.initial_memories(batch_size)
 
     def scan_step(carry, step_inputs):
-        step_logits, next_carry = model.step(step_inputs[0], carry, step_inputs[1])
+        step_logits, next_carry = model.step(step_inputs[0], carry, step_inputs[1], step_inputs[2])
         return next_carry, step_logits
 
-    final_memories, logits_t = jax.lax.scan(scan_step, memories, (input_ids.T, token_mask.T))
+    positions = jnp.broadcast_to(jnp.arange(input_ids.shape[1], dtype=jnp.int32)[:, None], input_ids.T.shape)
+    final_memories, logits_t = jax.lax.scan(scan_step, memories, (input_ids.T, token_mask.T, positions))
     return logits_t[-1], final_memories
 
 
@@ -4841,6 +5540,36 @@ def sample_audio_candidate_token_jit(
 
 
 @nnx.jit
+def sample_audio_aux_codes_jit(
+    model: PropagatorModel,
+    hidden: jax.Array,
+    q0_token_ids: jax.Array,
+    key: jax.Array,
+    temperature: jax.Array,
+) -> jax.Array:
+    def scan_step(carry, aux_index):
+        depth_state, previous_token_ids, rng_key = carry
+        logits, next_depth_state = model.project_audio_aux_head(depth_state, previous_token_ids, aux_index)
+        scaled = logits / jnp.maximum(temperature, 1e-6)
+        rng_key, subkey = jax.random.split(rng_key)
+        if config.top_k > 0:
+            values, indices = jax.lax.top_k(scaled, min(config.top_k, scaled.shape[-1]))
+            sampled_local = jax.random.categorical(subkey, values, axis=-1)
+            codes = jnp.take_along_axis(indices, sampled_local[:, None], axis=-1).squeeze(-1).astype(jnp.int32)
+        else:
+            codes = jax.random.categorical(subkey, scaled, axis=-1).astype(jnp.int32)
+        next_token_ids = audio_token_start + (aux_index + 1) * int(config.audio_codebook_size) + codes
+        return (next_depth_state, next_token_ids, rng_key), codes
+
+    (_, _, _), codes_t = jax.lax.scan(
+        scan_step,
+        (hidden, q0_token_ids, key),
+        jnp.arange(7, dtype=jnp.int32),
+    )
+    return jnp.swapaxes(codes_t, 0, 1)
+
+
+@nnx.jit
 def generate_fixed_candidates_jit(
     model: PropagatorModel,
     start_logits: jax.Array,
@@ -4874,7 +5603,7 @@ def generate_fixed_candidates_jit(
 
 
 def model_blocked_ids_for_generation() -> list[int]:
-    return [
+    blocked = [
         token_ids_pad,
         token_ids_unk,
         token_ids_session,
@@ -4888,6 +5617,8 @@ def model_blocked_ids_for_generation() -> list[int]:
         token_ids_silence,
         token_ids_text_in,
     ]
+    blocked.extend(range(audio_token_start, audio_token_end))
+    return blocked
 
 
 def token_label(token_id: int) -> str:
@@ -4971,14 +5702,16 @@ def step_runtime(
     token_id: int,
     memories: tuple[jax.Array, ...],
     use_candidate_head: bool,
+    position: int,
 ) -> tuple[jax.Array, tuple[jax.Array, ...], np.ndarray | None]:
     input_id = jnp.asarray([int(token_id)], dtype=jnp.int32)
     valid = jnp.ones_like(input_id, dtype=jnp.bool_)
+    positions = jnp.asarray([int(position)], dtype=jnp.int32)
     if use_candidate_head:
         candidate_ids = jnp.asarray(candidate_token_ids_host, dtype=jnp.int32)
-        logits, memories = runtime_step_candidates(model, input_id, memories, valid, candidate_ids)
+        logits, memories = runtime_step_candidates(model, input_id, memories, valid, candidate_ids, positions)
         return logits, memories, np.asarray(candidate_token_ids_host, dtype=np.int32)
-    logits, memories = runtime_step_full(model, input_id, memories, valid)
+    logits, memories = runtime_step_full(model, input_id, memories, valid, positions)
     return logits, memories, None
 
 
@@ -5036,6 +5769,7 @@ def generate_sample(
     chunks = chunks if chunks is not None else parse_sample_chunks()
     key = jax.random.PRNGKey(seed)
     memories = model.initial_memories(1)
+    position = 0
     lines: list[str] = []
 
     lines.append("# runtime loop sample")
@@ -5043,11 +5777,13 @@ def generate_sample(
     lines.append("")
     lines.append("## user stream")
 
-    logits, memories, candidate_ids_np = step_runtime(model, token_ids_session, memories, use_candidate_head)
+    logits, memories, candidate_ids_np = step_runtime(model, token_ids_session, memories, use_candidate_head, position)
+    position += 1
     raw = argmax_token_from_logits(logits, candidate_ids_np)
     lines.append(f"[SESSION] -> {token_label(user_mode_effective_decision(raw))}")
 
-    logits, memories, candidate_ids_np = step_runtime(model, token_ids_user, memories, use_candidate_head)
+    logits, memories, candidate_ids_np = step_runtime(model, token_ids_user, memories, use_candidate_head, position)
+    position += 1
     raw = argmax_token_from_logits(logits, candidate_ids_np)
     lines.append(f"[USER] -> {token_label(user_mode_effective_decision(raw))}")
 
@@ -5060,7 +5796,8 @@ def generate_sample(
 
         raw = token_ids_listen
         for token_id in tokenized:
-            logits, memories, candidate_ids_np = step_runtime(model, token_id, memories, use_candidate_head)
+            logits, memories, candidate_ids_np = step_runtime(model, token_id, memories, use_candidate_head, position)
+            position += 1
             raw = argmax_token_from_logits(logits, candidate_ids_np)
 
         effective_decision = user_mode_effective_decision(raw)
@@ -5078,7 +5815,8 @@ def generate_sample(
     lines.append("")
     lines.append("## model stream")
 
-    logits, memories, candidate_ids_np = step_runtime(model, token_ids_user_end, memories, use_candidate_head)
+    logits, memories, candidate_ids_np = step_runtime(model, token_ids_user_end, memories, use_candidate_head, position)
+    position += 1
     raw = argmax_token_from_logits(logits, candidate_ids_np)
     lines.append(f"[USER_END] -> {token_label(raw)}")
 
@@ -5087,7 +5825,8 @@ def generate_sample(
         return "\n".join(lines) + "\n"
 
     current_input = token_ids_model
-    logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head)
+    logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
+    position += 1
 
     for _ in range(config.sample_gen_len):
         key, subkey = jax.random.split(key)
@@ -5098,7 +5837,8 @@ def generate_sample(
             break
 
         current_input = next_token
-        logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head)
+        logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
+        position += 1
 
     return "\n".join(lines) + "\n"
 
@@ -5136,14 +5876,17 @@ def feed_runtime_tokens(
     memories: tuple[jax.Array, ...],
     token_sequence: list[int],
     use_candidate_head: bool,
-) -> tuple[jax.Array, tuple[jax.Array, ...], np.ndarray | None]:
+    start_position: int = 0,
+) -> tuple[jax.Array, tuple[jax.Array, ...], np.ndarray | None, int]:
     logits = None
     candidate_ids_np = None
+    position = int(start_position)
     for token_id in token_sequence:
-        logits, memories, candidate_ids_np = step_runtime(model, int(token_id), memories, use_candidate_head)
+        logits, memories, candidate_ids_np = step_runtime(model, int(token_id), memories, use_candidate_head, position)
+        position += 1
     if logits is None:
         raise ValueError("No runtime tokens were provided")
-    return logits, memories, candidate_ids_np
+    return logits, memories, candidate_ids_np, position
 
 
 def parse_audio_eval_prompts() -> list[str]:
@@ -5164,6 +5907,90 @@ def parse_audio_eval_prompts() -> list[str]:
     while len(prompts) < target:
         prompts.append(prompts[-1])
     return prompts[:target]
+
+
+def generate_audio_frames_after_prefix(
+    model: PropagatorModel,
+    seed: int,
+    prefix_ids: list[int],
+    max_tokens: int,
+) -> tuple[list[int], list[str], int | None, str]:
+    if not prefix_ids:
+        raise ValueError("Audio generation requires a non-empty prefix")
+
+    key = jax.random.PRNGKey(seed)
+    memories = model.initial_memories(1)
+    position = 0
+    if len(prefix_ids) > 1:
+        _, memories, _, position = feed_runtime_tokens(
+            model,
+            memories,
+            prefix_ids[:-1],
+            config.eval_use_candidate_head,
+            position,
+        )
+
+    current_input = jnp.asarray([prefix_ids[-1]], dtype=jnp.int32)
+    valid = jnp.ones((1,), dtype=jnp.bool_)
+    generated: list[int] = []
+    trace: list[str] = []
+    stop_token: int | None = None
+    stop_reason = "max_tokens"
+    min_tokens = max(0, int(config.audio_min_generation_tokens))
+    max_frames = max(1, int(max_tokens) // max(1, int(config.audio_codebooks)))
+
+    for _ in range(max_frames):
+        allow_stop = len(generated) >= min_tokens
+        q0_candidate_ids_np = build_audio_codebook_candidate_token_ids(0, allow_stop=allow_stop)
+        q0_candidate_ids = jnp.asarray(q0_candidate_ids_np, dtype=jnp.int32)
+        positions = jnp.asarray([position], dtype=jnp.int32)
+        q0_logits, hidden, memories = runtime_audio_frame_step(
+            model,
+            current_input,
+            memories,
+            valid,
+            q0_candidate_ids,
+            positions,
+        )
+        position += 1
+
+        key, q0_key, aux_key = jax.random.split(key, 3)
+        q0 = sample_audio_candidate_token_jit(
+            q0_logits,
+            q0_key,
+            q0_candidate_ids,
+            jnp.asarray(config.temperature, dtype=jnp.float32),
+        )
+        q0_token = int(jax.device_get(q0[0]))
+        if q0_token in {token_ids_audio_end, token_ids_model_end, token_ids_session_end}:
+            stop_token = q0_token
+            stop_reason = token_label(q0_token)
+            break
+
+        parsed_q0 = audio_code_from_token_id(q0_token)
+        if parsed_q0 is None or parsed_q0[0] != 0:
+            stop_reason = "invalid_q0"
+            break
+
+        aux_codes = np.asarray(
+            jax.device_get(
+                sample_audio_aux_codes_jit(
+                    model,
+                    hidden,
+                    q0,
+                    aux_key,
+                    jnp.asarray(config.temperature, dtype=jnp.float32),
+                )
+            )[0],
+            dtype=np.int32,
+        )
+        frame = [q0_token]
+        frame.extend(audio_token_id(codebook_idx, int(code)) for codebook_idx, code in enumerate(aux_codes, start=1))
+        generated.extend(frame)
+        trace.extend(token_label(token_id) for token_id in frame)
+        current_input = jnp.asarray([frame], dtype=jnp.int32)
+
+    return generated, trace, stop_token, stop_reason
 
 
 def generate_audio_eval(
@@ -5187,66 +6014,12 @@ def generate_audio_eval(
         token_ids_audio_out,
     ]
 
-    expected_codebook = 0
-    min_generation_tokens = max(0, int(config.audio_min_generation_tokens))
-    allow_stop = min_generation_tokens == 0
-    audio_candidate_ids_np = build_audio_codebook_candidate_token_ids(expected_codebook, allow_stop=allow_stop)
-    audio_candidate_ids = jnp.asarray(audio_candidate_ids_np, dtype=jnp.int32)
-    blocked_mask = jnp.zeros((len(audio_candidate_ids_np),), dtype=jnp.bool_)
-    memories = model.initial_memories(1)
-    if len(prefix_ids) > 1:
-        _, memories, _ = feed_runtime_tokens(
-            model,
-            memories,
-            prefix_ids[:-1],
-            config.eval_use_candidate_head and not config.eval_use_full_audio_head,
-        )
-    last_input = jnp.asarray([prefix_ids[-1]], dtype=jnp.int32)
-    valid = jnp.ones_like(last_input, dtype=jnp.bool_)
-    if config.eval_use_full_audio_head:
-        logits, memories = runtime_step_full(model, last_input, memories, valid)
-    else:
-        logits, memories = runtime_step_candidates(model, last_input, memories, valid, audio_candidate_ids)
-    key = jax.random.PRNGKey(seed)
-    generated: list[int] = []
-    trace: list[str] = []
-    stop_token: int | None = None
-    stop_reason = "max_tokens"
-
-    for _ in range(config.eval_audio_tokens):
-        key, subkey = jax.random.split(key)
-        if config.eval_use_full_audio_head:
-            candidate_ids_np = None
-            next_token = sample_model_token_from_logits(logits, subkey, candidate_ids_np, use_candidate_head=False)
-        else:
-            token = sample_audio_candidate_token_jit(
-                logits,
-                subkey,
-                audio_candidate_ids,
-                jnp.asarray(config.temperature, dtype=jnp.float32),
-            )
-            next_token = int(jax.device_get(token[0]))
-
-        generated.append(next_token)
-        trace.append(token_label(next_token))
-        if next_token in {token_ids_audio_end, token_ids_model_end, token_ids_session_end}:
-            stop_token = next_token
-            stop_reason = token_label(next_token)
-            break
-        parsed_audio = audio_code_from_token_id(next_token)
-        if parsed_audio is not None:
-            expected_codebook = (parsed_audio[0] + 1) % max(1, int(config.audio_codebooks))
-
-        input_id = jnp.asarray([next_token], dtype=jnp.int32)
-        valid = jnp.ones_like(input_id, dtype=jnp.bool_)
-        if config.eval_use_full_audio_head:
-            logits, memories = runtime_step_full(model, input_id, memories, valid)
-        else:
-            allow_stop = expected_codebook == 0 and len(generated) >= min_generation_tokens
-            audio_candidate_ids_np = build_audio_codebook_candidate_token_ids(expected_codebook, allow_stop=allow_stop)
-            audio_candidate_ids = jnp.asarray(audio_candidate_ids_np, dtype=jnp.int32)
-            blocked_mask = jnp.zeros((len(audio_candidate_ids_np),), dtype=jnp.bool_)
-            logits, memories = runtime_step_candidates(model, input_id, memories, valid, audio_candidate_ids)
+    generated, trace, stop_token, stop_reason = generate_audio_frames_after_prefix(
+        model,
+        seed,
+        prefix_ids,
+        int(config.eval_audio_tokens),
+    )
 
     raw_audio, sample_rate, decode_error = decode_audio_token_ids_to_waveform(generated)
     raw_signal_stats = audio_signal_stats(raw_audio, sample_rate)
@@ -5383,9 +6156,23 @@ def generate_text_after_prefix(
 ) -> tuple[list[int], list[str]]:
     key = jax.random.PRNGKey(seed)
     memories = model.initial_memories(1)
+    position = 0
     if len(prefix_ids) > 1:
-        _, memories, _ = feed_runtime_tokens(model, memories, prefix_ids[:-1], config.eval_use_candidate_head)
-    logits, memories, candidate_ids_np = step_runtime(model, prefix_ids[-1], memories, config.eval_use_candidate_head)
+        _, memories, _, position = feed_runtime_tokens(
+            model,
+            memories,
+            prefix_ids[:-1],
+            config.eval_use_candidate_head,
+            position,
+        )
+    logits, memories, candidate_ids_np = step_runtime(
+        model,
+        prefix_ids[-1],
+        memories,
+        config.eval_use_candidate_head,
+        position,
+    )
+    position += 1
     generated: list[int] = []
     trace: list[str] = []
     for _ in range(max(1, int(max_tokens))):
@@ -5395,7 +6182,14 @@ def generate_text_after_prefix(
         trace.append(token_label(token_id))
         if token_id in {token_ids_model_end, token_ids_session_end, token_ids_audio_out, token_ids_audio_end}:
             break
-        logits, memories, candidate_ids_np = step_runtime(model, token_id, memories, config.eval_use_candidate_head)
+        logits, memories, candidate_ids_np = step_runtime(
+            model,
+            token_id,
+            memories,
+            config.eval_use_candidate_head,
+            position,
+        )
+        position += 1
     return generated, trace
 
 
@@ -5405,45 +6199,7 @@ def generate_audio_after_prefix(
     prefix_ids: list[int],
     max_tokens: int,
 ) -> tuple[list[int], list[str]]:
-    key = jax.random.PRNGKey(seed)
-    memories = model.initial_memories(1)
-    if len(prefix_ids) > 1:
-        _, memories, _ = feed_runtime_tokens(
-            model,
-            memories,
-            prefix_ids[:-1],
-            config.eval_use_candidate_head and not config.eval_use_full_audio_head,
-        )
-    expected_codebook = 0
-    candidate_ids_np = build_audio_codebook_candidate_token_ids(expected_codebook, allow_stop=False)
-    candidate_ids = jnp.asarray(candidate_ids_np, dtype=jnp.int32)
-    last_input = jnp.asarray([prefix_ids[-1]], dtype=jnp.int32)
-    valid = jnp.ones_like(last_input, dtype=jnp.bool_)
-    logits, memories = runtime_step_candidates(model, last_input, memories, valid, candidate_ids)
-    generated: list[int] = []
-    trace: list[str] = []
-    min_tokens = max(0, int(config.audio_min_generation_tokens))
-    for _ in range(max(1, int(max_tokens))):
-        key, subkey = jax.random.split(key)
-        token = sample_audio_candidate_token_jit(
-            logits,
-            subkey,
-            candidate_ids,
-            jnp.asarray(config.temperature, dtype=jnp.float32),
-        )
-        token_id = int(jax.device_get(token[0]))
-        generated.append(token_id)
-        trace.append(token_label(token_id))
-        if token_id in {token_ids_audio_end, token_ids_model_end, token_ids_session_end}:
-            break
-        parsed = audio_code_from_token_id(token_id)
-        if parsed is not None:
-            expected_codebook = (parsed[0] + 1) % max(1, int(config.audio_codebooks))
-        allow_stop = expected_codebook == 0 and len(generated) >= min_tokens
-        candidate_ids_np = build_audio_codebook_candidate_token_ids(expected_codebook, allow_stop=allow_stop)
-        candidate_ids = jnp.asarray(candidate_ids_np, dtype=jnp.int32)
-        input_id = jnp.asarray([token_id], dtype=jnp.int32)
-        logits, memories = runtime_step_candidates(model, input_id, memories, valid, candidate_ids)
+    generated, trace, _, _ = generate_audio_frames_after_prefix(model, seed, prefix_ids, max_tokens)
     return generated, trace
 
 
@@ -5521,6 +6277,7 @@ class StatefulChunkSampler:
     stream_ids: np.ndarray
     batch_size: int
     seed: int
+    source_weights: list[float] | None = None
 
     def __post_init__(self):
         stream_ids_np = np.asarray(self.stream_ids)
@@ -5533,9 +6290,57 @@ class StatefulChunkSampler:
         self.stream_ranges = [(int(s), int(e)) for s, e in zip(starts, ends, strict=True)]
 
         self.rng = np.random.default_rng(self.seed)
-        self.order = np.arange(len(self.stream_ranges), dtype=np.int64)
-        self.rng.shuffle(self.order)
-        self.order_pos = 0
+        self.source_orders: dict[int, np.ndarray] = {}
+        self.source_order_pos: dict[int, int] = {}
+
+        source_to_streams: dict[int, list[int]] = {}
+        max_source = len(self.source_weights or [])
+        for stream_idx, (start, _) in enumerate(self.stream_ranges):
+            stream_id = int(stream_ids_np[start])
+            source_idx = int(stream_id // 1_000_000_000) - 1
+            if source_idx < 0 or (max_source > 0 and source_idx >= max_source):
+                source_idx = 0
+            source_to_streams.setdefault(source_idx, []).append(stream_idx)
+
+        for source_idx, indices in source_to_streams.items():
+            order = np.asarray(indices, dtype=np.int64)
+            self.rng.shuffle(order)
+            self.source_orders[source_idx] = order
+            self.source_order_pos[source_idx] = 0
+
+        available_sources = sorted(self.source_orders)
+        if not available_sources:
+            raise ValueError("No source streams available for sampler")
+
+        if self.source_weights:
+            weights = np.asarray(
+                [max(0.0, float(self.source_weights[idx])) if idx < len(self.source_weights) else 0.0 for idx in available_sources],
+                dtype=np.float64,
+            )
+            if float(weights.sum()) <= 0.0:
+                weights = np.ones_like(weights)
+        else:
+            weights = np.asarray([len(self.source_orders[idx]) for idx in available_sources], dtype=np.float64)
+        weights /= weights.sum()
+
+        raw_counts = weights * int(self.batch_size)
+        lane_counts = np.floor(raw_counts).astype(np.int64)
+        remainder = int(self.batch_size) - int(lane_counts.sum())
+        if remainder > 0:
+            fractional_order = np.argsort(-(raw_counts - lane_counts))
+            lane_counts[fractional_order[:remainder]] += 1
+        self.lane_sources = np.concatenate(
+            [
+                np.full(int(count), source_idx, dtype=np.int64)
+                for source_idx, count in zip(available_sources, lane_counts, strict=True)
+            ]
+        )
+        self.rng.shuffle(self.lane_sources)
+        self.source_lane_counts = {
+            int(source_idx): int(count)
+            for source_idx, count in zip(available_sources, lane_counts, strict=True)
+            if int(count) > 0
+        }
 
         self.lane_pos = np.zeros((self.batch_size,), dtype=np.int64)
         self.lane_end = np.zeros((self.batch_size,), dtype=np.int64)
@@ -5544,16 +6349,18 @@ class StatefulChunkSampler:
         for lane in range(self.batch_size):
             self._assign_stream(lane)
 
-    def _next_stream_range(self) -> tuple[int, int]:
-        if self.order_pos >= len(self.order):
-            self.rng.shuffle(self.order)
-            self.order_pos = 0
-        stream_idx = int(self.order[self.order_pos])
-        self.order_pos += 1
+    def _next_stream_range(self, source_idx: int) -> tuple[int, int]:
+        order = self.source_orders[source_idx]
+        order_pos = self.source_order_pos[source_idx]
+        if order_pos >= len(order):
+            self.rng.shuffle(order)
+            order_pos = 0
+        stream_idx = int(order[order_pos])
+        self.source_order_pos[source_idx] = order_pos + 1
         return self.stream_ranges[stream_idx]
 
     def _assign_stream(self, lane: int) -> None:
-        start, end = self._next_stream_range()
+        start, end = self._next_stream_range(int(self.lane_sources[lane]))
         self.lane_pos[lane] = start
         self.lane_end[lane] = end
         self.lane_needs_reset[lane] = True
@@ -5587,6 +6394,10 @@ def get_batch_by_indices(
     return batch_inputs, batch_targets, batch_weights
 
 
+def get_chunk_positions_by_indices(positions_arr: np.ndarray, indices: np.ndarray) -> jax.Array:
+    return maybe_put_vector(np.asarray(positions_arr[indices], dtype=np.int32), np.int32)
+
+
 def sample_control_indices(total: int, batch_size: int, seed: int) -> np.ndarray:
     if total <= 0 or batch_size <= 0:
         return np.zeros((0,), dtype=np.int64)
@@ -5599,6 +6410,7 @@ def inject_train_control_examples(
     batch_targets_np: np.ndarray,
     batch_weights_np: np.ndarray,
     reset_mask_np: np.ndarray,
+    chunk_positions_np: np.ndarray,
     step: int,
 ) -> None:
     if train_control_input_tokens is None or len(train_control_input_tokens) == 0:
@@ -5609,14 +6421,19 @@ def inject_train_control_examples(
     lane_count = int(round(int(config.batch_size) * rate))
     lane_count = max(1, min(int(config.batch_size), lane_count))
     indices = sample_control_indices(len(train_control_input_tokens), lane_count, config.seed + 40_000 + int(step))
-    lanes = np.arange(lane_count, dtype=np.int64)
+    rng = np.random.default_rng(config.seed + 45_000 + int(step))
+    lanes = rng.choice(int(config.batch_size), size=lane_count, replace=False).astype(np.int64)
     batch_inputs_np[lanes] = np.asarray(train_control_input_tokens[indices], dtype=np.int32)
     batch_targets_np[lanes] = np.asarray(train_control_target_tokens[indices], dtype=np.int32)
     batch_weights_np[lanes] = np.asarray(train_control_loss_weights[indices], dtype=np.float32)
+    if train_control_chunk_positions is not None:
+        chunk_positions_np[lanes] = np.asarray(train_control_chunk_positions[indices], dtype=np.int32)
+    else:
+        chunk_positions_np[lanes] = 0
     reset_mask_np[lanes] = True
 
 
-def get_validation_control_batch(idx: int) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+def get_validation_control_batch(idx: int) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     if val_control_input_tokens is None or len(val_control_input_tokens) == 0:
         raise ValueError("No validation control chunks are available")
     indices = sample_control_indices(len(val_control_input_tokens), int(config.batch_size), config.seed + 50_000 + int(idx))
@@ -5624,12 +6441,17 @@ def get_validation_control_batch(idx: int) -> tuple[jax.Array, jax.Array, jax.Ar
     batch_targets = maybe_put_batch(np.asarray(val_control_target_tokens[indices], dtype=np.int32), np.int32)
     batch_weights = maybe_put_batch(np.asarray(val_control_loss_weights[indices], dtype=np.float32), np.float32)
     reset_mask = maybe_put_vector(np.ones((int(config.batch_size),), dtype=np.bool_), np.bool_)
+    if val_control_chunk_positions is None:
+        chunk_positions_np = np.zeros((int(config.batch_size),), dtype=np.int32)
+    else:
+        chunk_positions_np = np.asarray(val_control_chunk_positions[indices], dtype=np.int32)
+    chunk_positions = maybe_put_vector(chunk_positions_np, np.int32)
     if val_control_chunk_task_ids is None:
         task_ids_np = np.zeros((int(config.batch_size),), dtype=np.int32)
     else:
         task_ids_np = np.asarray(val_control_chunk_task_ids[indices], dtype=np.int32)
     task_ids = maybe_put_vector(task_ids_np, np.int32)
-    return batch_inputs, batch_targets, batch_weights, reset_mask, task_ids
+    return batch_inputs, batch_targets, batch_weights, reset_mask, chunk_positions, task_ids
 
 
 def get_random_batch(step_index: int, shuffled_indices: np.ndarray) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -5714,6 +6536,14 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
         asr_task_total,
         tts_task_total,
         duplex_task_total,
+        text_task_nll,
+        asr_task_nll,
+        tts_task_nll,
+        duplex_task_nll,
+        text_task_weight,
+        asr_task_weight,
+        tts_task_weight,
+        duplex_task_weight,
     ) = [float(x) for x in metric_sums]
 
     def ratio(num: float, den: float) -> float:
@@ -5747,6 +6577,10 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
         "asr_task_acc": ratio(asr_task_correct, asr_task_total),
         "tts_task_acc": ratio(tts_task_correct, tts_task_total),
         "duplex_task_acc": ratio(duplex_task_correct, duplex_task_total),
+        "text_task_ce": ratio(text_task_nll, text_task_weight),
+        "asr_task_ce": ratio(asr_task_nll, asr_task_weight),
+        "tts_task_ce": ratio(tts_task_nll, tts_task_weight),
+        "duplex_task_ce": ratio(duplex_task_nll, duplex_task_weight),
         "decision_total": decision_total,
         "listen_total": listen_total,
         "user_end_total": user_end_total,
@@ -5764,7 +6598,12 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
     metric_sums = np.zeros((VALIDATION_METRIC_SIZE,), dtype=np.float64)
 
     if config.stateful_validation:
-        sampler = StatefulChunkSampler(val_stream_ids, config.batch_size, config.seed + 10_000 + step)
+        sampler = StatefulChunkSampler(
+            val_stream_ids,
+            config.batch_size,
+            config.seed + 10_000,
+            source_weights=[float(spec["weight"]) for spec in parse_dataset_mix()],
+        )
         memories = initial_memories_for_training(model, config.batch_size)
 
         for _ in range(config.validation_batches):
@@ -5776,6 +6615,7 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
                 indices,
             )
             reset_mask = maybe_put_vector(reset_mask_np, np.bool_)
+            chunk_positions = get_chunk_positions_by_indices(val_chunk_positions, indices)
 
             # Task ids: 0 Text->Text, 1 Audio->Text, 2 Text->Audio, 3 Audio->Audio/Hybrid.
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
@@ -5788,6 +6628,7 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
                 batch_weights,
                 memories,
                 reset_mask,
+                chunk_positions,
                 task_ids,
             )
             losses.append(float(ce_loss))
@@ -5804,6 +6645,7 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
             )
             memories = initial_memories_for_training(model, config.batch_size)
             reset_mask = maybe_put_vector(np.ones((config.batch_size,), dtype=np.bool_), np.bool_)
+            chunk_positions = get_chunk_positions_by_indices(val_chunk_positions, indices)
 
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
             task_ids = maybe_put_vector(task_ids_np, np.int32)
@@ -5815,6 +6657,7 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
                 batch_weights,
                 memories,
                 reset_mask,
+                chunk_positions,
                 task_ids,
             )
             losses.append(float(ce_loss))
@@ -5826,7 +6669,7 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
         and int(config.validation_control_batches) > 0
     ):
         for i in range(int(config.validation_control_batches)):
-            batch_inputs, batch_targets, batch_weights, reset_mask, task_ids = get_validation_control_batch(step + i)
+            batch_inputs, batch_targets, batch_weights, reset_mask, chunk_positions, task_ids = get_validation_control_batch(step + i)
             memories = initial_memories_for_training(model, config.batch_size)
             ce_loss, _, metrics = validation_step_stateful(
                 model,
@@ -5835,6 +6678,7 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
                 batch_weights,
                 memories,
                 reset_mask,
+                chunk_positions,
                 task_ids,
             )
             losses.append(float(ce_loss))
@@ -6133,11 +6977,11 @@ def write_edge_memory_report(model: PropagatorModel, output_root: Path) -> None:
     per_device_batch = math.ceil(int(config.batch_size) / device_count)
     recurrent_state_bytes = (
         int(config.num_layers)
-        * int(config.batch_size)
         * int(config.memory_key_size)
         * int(config.memory_value_size)
         * np.dtype(np.float32).itemsize
     )
+    recurrent_state_bytes_total_batch = recurrent_state_bytes * int(config.batch_size)
     scan_memory_matrix_bytes_per_layer_device = (
         int(config.train_unroll_len)
         * per_device_batch
@@ -6150,8 +6994,18 @@ def write_edge_memory_report(model: PropagatorModel, output_root: Path) -> None:
         "params": params,
         "training_param_bytes": fp_bytes,
         "rough_adamw_optimizer_state_bytes": fp_bytes * 2,
-        "training_recurrent_state_bytes_total_batch": recurrent_state_bytes,
-        "training_recurrent_state_bytes_per_device_if_sharded": math.ceil(recurrent_state_bytes / device_count),
+        "architecture": {
+            "associative_groups": config.associative_groups,
+            "use_swiglu": config.use_swiglu,
+            "moe_num_experts": config.moe_num_experts,
+            "moe_top_k": config.moe_top_k,
+            "rope_base": config.rope_base,
+            "rope_position_scale": config.rope_position_scale,
+            "rope_max_position": config.rope_max_position,
+        },
+        "serving_recurrent_state_bytes_batch_1": recurrent_state_bytes,
+        "training_recurrent_state_bytes_total_batch": recurrent_state_bytes_total_batch,
+        "training_recurrent_state_bytes_per_device_if_sharded": math.ceil(recurrent_state_bytes_total_batch / device_count),
         "jax_device_count": device_count,
         "per_device_batch_if_evenly_sharded": per_device_batch,
         "remat_scan_step": bool(config.remat_scan_step),
@@ -6553,7 +7407,14 @@ def main() -> None:
         config = config.model_copy(update={"batch_size": adjusted})
 
     steps_per_epoch = max(1, len(train_input_tokens) // config.batch_size)
-    total_steps = min(config.epochs * steps_per_epoch, config.max_train_steps or 10**9)
+    epoch_total_steps = config.epochs * steps_per_epoch
+    total_steps = epoch_total_steps
+    if int(config.max_steps) > 0:
+        total_steps = min(epoch_total_steps, int(config.max_steps))
+    log_info(
+        f"[Schedule] steps_per_epoch={steps_per_epoch}, epoch_total_steps={epoch_total_steps}, "
+        f"max_steps={int(config.max_steps)}, total_steps={total_steps}"
+    )
     (output_root / "run_config.json").write_text(config.model_dump_json(indent=2) + "\n", encoding="utf-8")
 
     optimizer = nnx.Optimizer(model, build_optimizer(total_steps), wrt=nnx.Param)
@@ -6579,6 +7440,8 @@ def main() -> None:
     val_asr_task_accs: list[float] = []
     val_tts_task_accs: list[float] = []
     val_duplex_task_accs: list[float] = []
+    best_early_stop_loss = float("inf")
+    evals_without_improvement = 0
 
     # Resume from latest checkpoint if exists
     ckpt_dirs = sorted(list(output_root.glob("step_*")), key=lambda x: int(x.name.split("_")[1]), reverse=True)
@@ -6639,7 +7502,19 @@ def main() -> None:
     shuffled = shuffle_data_for_epoch(start_step // steps_per_epoch)
 
     if config.stateful_train:
-        train_sampler = StatefulChunkSampler(train_stream_ids, config.batch_size, config.seed + start_step)
+        train_sampler = StatefulChunkSampler(
+            train_stream_ids,
+            config.batch_size,
+            config.seed + start_step,
+            source_weights=[float(spec["weight"]) for spec in parse_dataset_mix()],
+        )
+        source_specs = parse_dataset_mix()
+        source_lane_summary = {
+            f"{idx}:{source_specs[idx]['name']}": count
+            for idx, count in train_sampler.source_lane_counts.items()
+            if idx < len(source_specs)
+        }
+        log_info(f"[Sampler] Stateful source lanes: {json.dumps(source_lane_summary, ensure_ascii=False)}")
         carry_memories = initial_memories_for_training(model, config.batch_size)
     else:
         train_sampler = None
@@ -6651,6 +7526,7 @@ def main() -> None:
     last_train_log_step = start_step
 
     for step in pbar:
+        should_early_stop = False
         if not config.stateful_train and step > 0 and step % steps_per_epoch == 0:
             shuffled = shuffle_data_for_epoch(step // steps_per_epoch)
             log_info(f"\n[Shuffle] Epoch {step // steps_per_epoch} started")
@@ -6663,17 +7539,20 @@ def main() -> None:
             batch_inputs_np = np.asarray(train_input_tokens[indices], dtype=np.int32).copy()
             batch_targets_np = np.asarray(train_target_tokens[indices], dtype=np.int32).copy()
             batch_weights_np = np.asarray(train_loss_weights[indices], dtype=np.float32).copy()
+            chunk_positions_np = np.asarray(train_chunk_positions[indices], dtype=np.int32).copy()
             inject_train_control_examples(
                 batch_inputs_np,
                 batch_targets_np,
                 batch_weights_np,
                 reset_mask_np,
+                chunk_positions_np,
                 step,
             )
             batch_inputs = maybe_put_batch(batch_inputs_np, np.int32)
             batch_targets = maybe_put_batch(batch_targets_np, np.int32)
             batch_weights = maybe_put_batch(batch_weights_np, np.float32)
             reset_mask = maybe_put_vector(reset_mask_np, np.bool_)
+            chunk_positions = maybe_put_vector(chunk_positions_np, np.int32)
             ce_loss_val, carry_memories = train_step_stateful(
                 model,
                 optimizer,
@@ -6682,6 +7561,7 @@ def main() -> None:
                 batch_weights,
                 carry_memories,
                 reset_mask,
+                chunk_positions,
             )
         else:
             batch_inputs, batch_targets, batch_weights = get_random_batch(step, shuffled)
@@ -6720,6 +7600,16 @@ def main() -> None:
 
         if act_step % config.eval_every == 0:
             v_loss, v_metrics = run_validation(model, act_step)
+
+            if v_loss < best_early_stop_loss - float(config.early_stopping_min_delta):
+                best_early_stop_loss = v_loss
+                evals_without_improvement = 0
+            else:
+                evals_without_improvement += 1
+            should_early_stop = (
+                int(config.early_stopping_patience) > 0
+                and evals_without_improvement >= int(config.early_stopping_patience)
+            )
 
             val_steps.append(act_step)
             val_losses.append(v_loss)
@@ -6786,15 +7676,15 @@ def main() -> None:
 
             text_meta = generate_text_eval_samples(
                 model,
-                config.seed + act_step,
+                config.seed + 30_000,
                 out_dir,
                 use_candidate_head=config.eval_use_candidate_head,
             )
             audio_meta = None
             audio_input_meta = None
             if config.enable_audio and config.eval_audio_every > 0 and act_step % config.eval_audio_every == 0:
-                audio_meta = generate_audio_evals(model, config.seed + 99_000 + act_step, out_dir)
-                audio_input_meta = generate_audio_input_evals(model, config.seed + 199_000 + act_step, out_dir)
+                audio_meta = generate_audio_evals(model, config.seed + 99_000, out_dir)
+                audio_input_meta = generate_audio_input_evals(model, config.seed + 199_000, out_dir)
 
             (out_dir / "validation_metrics.json").write_text(
                 json.dumps(v_metrics, ensure_ascii=False, indent=2) + "\n",
@@ -6816,6 +7706,10 @@ def main() -> None:
             prune_local_eval_dirs(output_root, act_step)
 
             log_info(f"\n[Eval] CE={v_loss:.4f}")
+            log_info(
+                f"[Early Stop] best={best_early_stop_loss:.4f}, "
+                f"without_improvement={evals_without_improvement}/{config.early_stopping_patience}"
+            )
             log_info(json.dumps(v_metrics, ensure_ascii=False, indent=2))
             if audio_meta is not None:
                 audio_summary = [
@@ -6831,11 +7725,11 @@ def main() -> None:
                 log_info(f"[Audio Input Eval] {json.dumps(input_summary, ensure_ascii=False)}")
             log_info(f"[Sample] wrote {len(text_meta)} text samples to {out_dir}")
 
-        if act_step % config.checkpoint_every == 0 or act_step == total_steps:
+        if act_step % config.checkpoint_every == 0 or act_step == total_steps or should_early_stop:
             ckpt_dir = output_root / f"step_{act_step}"
             save_checkpoint(checkpointer, model, optimizer, ckpt_dir)
             checkpoint_backup_ok = True
-            if config.gcs_sync_every > 0:
+            if config.gcs_sync_every > 0 and (act_step % config.gcs_sync_every == 0 or should_early_stop):
                 try:
                     sync_checkpoint_to_gcs(act_step, ckpt_dir)
                 except Exception as exc:
@@ -6846,8 +7740,15 @@ def main() -> None:
             else:
                 log_info("[Checkpoint] Local checkpoint pruning skipped because GCS checkpoint backup failed")
 
-        if config.gcs_sync_every > 0 and act_step % config.gcs_sync_every == 0:
+        if config.gcs_sync_every > 0 and (act_step % config.gcs_sync_every == 0 or should_early_stop):
             start_gcs_backup(act_step, output_root / f"step_{act_step}")
+
+        if should_early_stop:
+            log_info(
+                f"[Early Stop] stopping at step {act_step}: validation did not improve by "
+                f"{config.early_stopping_min_delta} for {config.early_stopping_patience} evaluations"
+            )
+            break
 
     wait_for_backups()
 

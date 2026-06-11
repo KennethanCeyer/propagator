@@ -1,0 +1,36 @@
+[
+  {
+    "name": "json",
+    "data_files": "data/propagator_posttrain_10k.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "duplex_chat",
+    "streaming": false,
+    "repeat": 8,
+    "weight": 0.55
+  },
+  {
+    "name": "json",
+    "data_files": "data/propagator_identity.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "duplex_chat",
+    "streaming": false,
+    "repeat": 40,
+    "weight": 0.15
+  },
+  {
+    "name": "databricks/databricks-dolly-15k",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "dolly_instruction",
+    "weight": 0.20
+  },
+  {
+    "name": "xinrongzhang2022/Duplex-UltraChat",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "duplex_chat",
+    "weight": 0.10
+  }
+]

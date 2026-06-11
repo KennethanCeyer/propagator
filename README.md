@@ -21,7 +21,9 @@ The current experimental run is a multimodal duplex model trained on text dialog
 
 ## Current Snapshot
 
-Latest completed evaluation: step 440,000 from `outputs/propagator-multimodal-v2`.
+Latest audited evaluation before the current restart: step 790,000 from the previous multimodal run; the latest completed recovery checkpoint at audit time was step 780,000.
+
+The detailed failure analysis and restart decision are in [`TRAINING_AUDIT_790K.md`](TRAINING_AUDIT_790K.md).
 
 | Item | Value |
 | :--- | :--- |
@@ -32,15 +34,15 @@ Latest completed evaluation: step 440,000 from `outputs/propagator-multimodal-v2
 | Training unroll | 32 stream steps |
 | Effective batch | 64, sharded across 4 JAX devices |
 | Tokenizer | 16k byte-level BPE plus protocol/audio tokens |
-| Audio codec | EnCodec, 24 kHz, 8 codebooks x 1024 codes |
+| Audited v2 audio codec | EnCodec, 24 kHz, 8 codebooks x 1024 codes at 75 Hz |
 | Precision | bfloat16 training |
-| Optimizer | AdamW, peak LR 3e-4 |
+| Optimizer | AdamW, peak LR 1e-4, 5k warmup, 0.01 weight decay in the corrective training script |
 
 The run is still a research prototype. Turn-taking and output-mode control are already learnable, but generated language quality is uneven and exact audio-codebook accuracy remains low.
 
 ## Training Data
 
-The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix_v3.json`. The mix combines public text, instruction, dialogue, ASR, TTS, and paired speech-dialogue datasets with a small local identity set for model-name consistency.
+The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix.json`. The mix combines public text, instruction, dialogue, ASR, TTS, paired speech-dialogue, and a small local identity set for model-name consistency without letting identity rows dominate the sampler.
 
 The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current training mix contains `977,638,592` packed training tokens; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training.
 
@@ -399,20 +401,40 @@ The checked-in script configures the active multimodal run:
 | Setting | Default |
 | :--- | :--- |
 | Model | 24 layers, hidden 1536, memory 384 x 768 |
+| Recurrent memory upgrades | 4 grouped associative key lanes, RoPE-style stream-position key rotation, SwiGLU MLP; optional MoE experts |
 | Batch | auto-batched, max 16 examples per device |
 | Precision | bfloat16 |
 | Optimizer | AdamW with grad clipping |
-| Tokenizer | 16k byte-level BPE |
-| Audio | EnCodec, 24 kHz, 8 codebooks |
+| Training cap | No max-step cap is set by default; training duration is controlled by epochs, checkpoint cadence, validation, and operator stop/resume policy |
+| Tokenizer | 16k byte-level BPE by default; SL2610 preset trains/uses a 32k target when `TOKENIZER_VOCAB_SIZE` is not overridden |
+| Audio | Mimi, 24 kHz, 8 synchronized codebooks x 2048 codes at 12.5 Hz |
 | Eval cadence | every 5,000 steps |
 | Checkpoint cadence | every 10,000 steps |
-| GCS cadence | every 20,000 steps when `GCS_BACKUP_DIR` is set |
+| GCS cadence | every 10,000 steps when `GCS_BACKUP_DIR` is set |
 
 Most settings can be overridden through environment variables before launching:
 
 ```bash
 HIDDEN_SIZE=768 NUM_LAYERS=12 BATCH_SIZE=16 bash scripts/train.sh --foreground
 ```
+
+### Post-Training / SL2610 2GB Preset
+
+The repository includes a README-aligned English-only post-training set at `data/propagator_posttrain_10k.jsonl` and a mix file at `data/propagator_posttrain_mix.json`. The rows focus on Propagator identity, recurrent matrix memory behavior, turn-taking, recall, edge serving, quantization, and the architecture changes above.
+
+Run a compact architecture intended for 4-bit edge serving experiments:
+
+```bash
+POST_TRAIN=1 MODEL_PRESET=sl2610 bash scripts/train.sh
+```
+
+Run the same preset in the foreground:
+
+```bash
+POST_TRAIN=1 MODEL_PRESET=sl2610 bash scripts/train.sh --foreground
+```
+
+The SL2610 preset sets hidden size 768, 16 layers, 192 x 384 memory, grouped associative memory, SwiGLU, two MoE experts with top-1 routing, a 32k tokenizer target, and 4-bit edge reporting. The training hardware and serving target are intentionally separate: training can run on TPU/GPU infrastructure, while the architecture and edge report budget for batch-1 SL2610 2GB VRAM serving.
 
 ## Research Application
 
