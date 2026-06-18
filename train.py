@@ -1798,6 +1798,26 @@ def get_audio_codec() -> dict[str, Any] | None:
     if _audio_codec_error is not None:
         return None
 
+    def _audio_codec_error_message(exc: Exception) -> str:
+        return f"{type(exc).__name__}: {exc}"
+
+    def _load_encodec_codec() -> dict[str, Any]:
+        import torch
+        from encodec import EncodecModel
+        from encodec.utils import convert_audio
+
+        # Restrict PyTorch to a single thread to avoid contention across preprocessing workers.
+        torch.set_num_threads(1)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+
+        model = EncodecModel.encodec_model_24khz()
+        model.set_target_bandwidth(6.0)
+        model.eval()
+        return {"backend": "encodec", "torch": torch, "model": model, "convert_audio": convert_audio}
+
     if config.audio_backend == "mimi":
         try:
             import rustymimi
@@ -1817,41 +1837,38 @@ def get_audio_codec() -> dict[str, Any] | None:
                 dtype="f32",
             )
             _audio_codec = {"backend": "mimi", "model": model, "model_path": model_path}
+            _audio_codec_error = None
             return _audio_codec
         except Exception as exc:
-            _audio_codec_error = f"{type(exc).__name__}: {exc}"
-            raise RuntimeError(
-                "[Audio] Mimi backend unavailable for requested --audio-backend=mimi; install rustymimi or use --audio-backend encodec. "
+            _audio_codec_error = _audio_codec_error_message(exc)
+            log_info(
+                f"[Audio] Mimi backend unavailable for requested --audio-backend=mimi; attempting Encodec fallback. "
                 f"Error: {_audio_codec_error}"
-            ) from exc
+            )
+            try:
+                _audio_codec = _load_encodec_codec()
+                _audio_codec_error = None
+                log_info("[Audio] Falling back to Encodec backend for this run.")
+                return _audio_codec
+            except Exception as fallback_exc:
+                _audio_codec_error = _audio_codec_error_message(fallback_exc)
+                log_info(
+                    "[Audio] Encodec fallback unavailable; audio will be disabled for this run. "
+                    f"Error: {_audio_codec_error}"
+                )
+                return None
 
     if config.audio_backend != "encodec":
         return None
 
     try:
-        import torch
-        from encodec import EncodecModel
-        from encodec.utils import convert_audio
-
-        # Restrict PyTorch to a single thread to avoid contention across preprocessing workers.
-        torch.set_num_threads(1)
-        try:
-            torch.set_num_interop_threads(1)
-        except RuntimeError:
-            pass
-
-        model = EncodecModel.encodec_model_24khz()
-        model.set_target_bandwidth(6.0)
-        model.eval()
-        _audio_codec = {"backend": "encodec", "torch": torch, "model": model, "convert_audio": convert_audio}
+        _audio_codec = _load_encodec_codec()
         _audio_codec_error = None
         return _audio_codec
     except Exception as exc:
-        _audio_codec_error = f"{type(exc).__name__}: {exc}"
-        raise RuntimeError(
-            "[Audio] Encodec backend unavailable for requested --audio-backend=encodec. "
-            f"Audio will be unavailable for this run. Error: {_audio_codec_error}"
-        ) from exc
+        _audio_codec_error = _audio_codec_error_message(exc)
+        log_info(f"[Audio] Encodec backend unavailable. Audio will be disabled for this run. Error: {_audio_codec_error}")
+        return None
 
 
 def audio_codes_to_token_frames(codes_np: np.ndarray) -> list[list[int]]:
@@ -3086,8 +3103,12 @@ def _worker_tokenize_echox_shard(args):
         last_log_chunks = emitted_chunks
         debug_max_rows = local_spec.get("debug_max_rows")
         debug_max_rows = int(debug_max_rows) if debug_max_rows is not None else None
-        part_rows = max(1, int(local_spec.get("part_rows") or 250))
-        part_chunks_limit = max(1, int(local_spec.get("part_chunks") or 8192))
+        spec_part_rows = int(local_spec.get("part_rows") or 0) if local_spec.get("part_rows") is not None else 0
+        spec_part_chunks = int(local_spec.get("part_chunks") or 0) if local_spec.get("part_chunks") is not None else 0
+        env_part_rows = int(os.environ.get("AUDIO_PREPROCESSING_PART_ROWS", "0") or "0")
+        env_part_chunks = int(os.environ.get("AUDIO_PREPROCESSING_PART_CHUNKS", "0") or "0")
+        part_rows = max(1, spec_part_rows or env_part_rows or 2000)
+        part_chunks_limit = max(1, spec_part_chunks or env_part_chunks or 32768)
 
         current_part_start_rows = committed_source_rows
         current_part_stats = {
