@@ -24,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 import wave
 from datetime import datetime
 from dataclasses import dataclass
@@ -44,6 +45,15 @@ from flax import nnx
 from pydantic_settings import BaseSettings
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from tqdm import tqdm
+
+# Fix deprecation warning in external encodec library by monkey-patching torch.nn.utils.weight_norm
+# before encodec is imported. The new API is torch.nn.utils.parametrizations.weight_norm.
+try:
+    import torch.nn.utils.parametrizations as parametrizations
+    import torch.nn.utils as utils
+    utils.weight_norm = parametrizations.weight_norm
+except ImportError:
+    pass
 
 load_dotenv()
 
@@ -188,7 +198,7 @@ class SlackLogMirror(logging.Handler):
                 },
                 method="POST",
             )
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=60) as response:
             body = response.read()
         if not self.webhook_url:
             try:
@@ -4273,6 +4283,12 @@ def tokenize_dataset_rows(
             int(config.text_preprocessing_chunk_size),
         )
         chunk_size = max(1, min(128, int(config.text_preprocessing_chunk_size)))
+        if num_workers > 64:
+            log_info(
+                f"[Tokenize:{split_name}] Limiting text workers from {num_workers} to 64; "
+                "excessive workers often lead to deadlocks and high IPC overhead."
+            )
+            num_workers = 64
 
     log_info(
         f"Starting parallel tokenization for {split_name} with {num_workers} workers "
@@ -4289,6 +4305,7 @@ def tokenize_dataset_rows(
         processes=num_workers,
         maxtasksperchild=max(0, int(config.tokenize_maxtasks_per_child or 0)) or None,
     )
+    _ACTIVE_POOLS.append(pool)
     env_imap = int(config.tokenize_imap_chunk_size or 0)
     if env_imap > 0:
         imap_chunk_size = max(1, env_imap)
@@ -4438,13 +4455,15 @@ def tokenize_dataset_rows(
             if source_rows % max(1, int(config.cache_flush_every)) == 0:
                 flush_progress()
             if not uncapped and actual_count >= effective_max_chunks:
-                log_info(f"[Tokenize:{split_name}] Reached target_chunks={effective_max_chunks}; closing worker pool after in-flight rows.")
+                log_info(f"[Tokenize:{split_name}] Reached target_chunks={effective_max_chunks}; terminating worker pool.")
                 stop_early = True
                 break
 
         pbar.close()
         pool_completed = True
     finally:
+        if pool in _ACTIVE_POOLS:
+            _ACTIVE_POOLS.remove(pool)
         if pool_completed and not stop_early:
             pool.close()
         else:
