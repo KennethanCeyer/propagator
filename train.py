@@ -283,6 +283,7 @@ token_ids: dict[str, int] = {}
 audio_token_id: Any = None
 _RUN_LOCK_FD: int | None = None
 _RUN_LOCK_PATH: Path | None = None
+_RUN_LOCK_OWNER_PID: int | None = None
 _ACTIVE_POOLS: list[Any] = []
 train_control_input_tokens: np.ndarray | None = None
 train_control_target_tokens: np.ndarray | None = None
@@ -548,8 +549,8 @@ class PropagatorConfig(BaseSettings):
     mimi_repo: str = "kyutai/moshika-pytorch-bf16"
     mimi_filename: str = "tokenizer-e351c8d8-checkpoint125.safetensors"
     mimi_cache_dir: str | None = None
-    max_audio_seconds: float = 4.0
-    max_audio_tokens_per_row: int = 512
+    max_audio_seconds: float = 0.0
+    max_audio_tokens_per_row: int = 0
     audio_task_mix: str = '{"asr":0.25,"tts":0.35,"audio":0.20,"hybrid":0.20}'
     tts_prompt_template: str = "Say this aloud: {text}"
     audio_eval_prompt: str = "Say this aloud: hello, I am listening."
@@ -719,7 +720,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-mode",
         type=str,
-        choices=["instruction_chat", "duplex_chat", "dolly_instruction", "plain_text", "audio_asr", "echox_s2s_dialogue", "speech_dialogue"],
+        choices=[
+            "instruction_chat",
+            "duplex_chat",
+            "dolly_instruction",
+            "plain_text",
+            "audio_asr",
+            "mimi_codes_asr",
+            "mimi_codes_tts",
+            "mimi_codes_speech_text",
+            "echox_s2s_dialogue",
+            "speech_dialogue",
+        ],
     )
     parser.add_argument("--dataset-mix", type=str)
     parser.add_argument("--dataset-split", type=str)
@@ -932,14 +944,14 @@ def build_config() -> PropagatorConfig:
         if raw_updates.get("audio_frames_per_second") is None:
             backend_updates["audio_frames_per_second"] = 12.5
         if raw_updates.get("max_audio_tokens_per_row") is None:
-            backend_updates["max_audio_tokens_per_row"] = 512
+            backend_updates["max_audio_tokens_per_row"] = 0
     elif cfg.audio_backend == "encodec":
         if raw_updates.get("audio_codebook_size") is None:
             backend_updates["audio_codebook_size"] = 1024
         if raw_updates.get("audio_frames_per_second") is None:
             backend_updates["audio_frames_per_second"] = 75.0
         if raw_updates.get("max_audio_tokens_per_row") is None:
-            backend_updates["max_audio_tokens_per_row"] = 2400
+            backend_updates["max_audio_tokens_per_row"] = 0
     if backend_updates:
         cfg = cfg.model_copy(update=backend_updates)
     if cfg.enable_audio and int(cfg.audio_codebooks) != 8:
@@ -1093,6 +1105,7 @@ def parse_dataset_mix() -> list[dict[str, Any]]:
                 "response_key": spec.get("response_key"),
                 "audio_key": spec.get("audio_key", "audio"),
                 "transcript_key": spec.get("transcript_key"),
+                "codes_key": spec.get("codes_key"),
                 "audio_task_mix": spec.get("audio_task_mix"),
                 "target_modality": spec.get("target_modality", "hybrid"),
                 "max_wer": spec.get("max_wer", 0.25),
@@ -1212,6 +1225,7 @@ def dataset_fingerprint(specs: list[dict[str, Any]], split_name: str) -> str:
             "weight": spec.get("weight"),
             "audio_key": spec.get("audio_key"),
             "transcript_key": spec.get("transcript_key"),
+            "codes_key": spec.get("codes_key"),
             "audio_task_mix": spec.get("audio_task_mix"),
             "target_modality": spec.get("target_modality"),
             "max_wer": spec.get("max_wer"),
@@ -1245,11 +1259,13 @@ def source_dataset_fingerprint(spec: dict[str, Any], split_name: str) -> str:
         "response_key": spec.get("response_key"),
         "audio_key": spec.get("audio_key"),
         "transcript_key": spec.get("transcript_key"),
+        "codes_key": spec.get("codes_key"),
         "audio_task_mix": spec.get("audio_task_mix"),
         "target_modality": spec.get("target_modality"),
         "max_wer": spec.get("max_wer"),
         "echox_subsets": spec.get("echox_subsets"),
         "max_shards": spec.get("max_shards"),
+        "max_chunks": spec.get("max_chunks"),
         "part_rows": spec.get("part_rows"),
         "part_chunks": spec.get("part_chunks"),
         "debug_max_rows": spec.get("debug_max_rows"),
@@ -1881,7 +1897,7 @@ def audio_codes_to_token_frames(codes_np: np.ndarray) -> list[list[int]]:
             frame.append(audio_token_id(codebook_idx, code))
         frame.extend([token_ids["pad"]] * (8 - len(frame)))
         frames.append(frame)
-        if len(frames) * 8 >= config.max_audio_tokens_per_row:
+        if int(config.max_audio_tokens_per_row) > 0 and len(frames) * 8 >= int(config.max_audio_tokens_per_row):
             return frames
     return frames
 
@@ -1894,8 +1910,9 @@ def normalize_audio_array_for_codec(audio: tuple[np.ndarray, int]) -> tuple[np.n
         array = array.T
     array = np.asarray(array, dtype=np.float32)
 
-    max_samples = int(max(1.0, config.max_audio_seconds) * sr)
-    array = array[:, :max_samples]
+    if float(config.max_audio_seconds) > 0.0:
+        max_samples = int(float(config.max_audio_seconds) * sr)
+        array = array[:, :max_samples]
     if array.size == 0:
         return None
     return array, int(sr)
@@ -2632,6 +2649,74 @@ def tokenize_audio_asr(row: dict, spec: dict[str, Any] | None = None) -> tuple[l
     return tokenize_modal_exchange(user_ids, text_output_ids(text_ids), user_inner_weight=config.listen_loss_weight)
 
 
+def extract_mimi_codes_array(row: dict, spec: dict[str, Any] | None = None) -> np.ndarray | None:
+    keys = []
+    if spec and spec.get("codes_key"):
+        keys.append(str(spec["codes_key"]))
+    keys.extend(["codes", "audio_codes", "mimi_codes"])
+    for key in keys:
+        if key not in row or row[key] is None:
+            continue
+        codes = np.asarray(row[key], dtype=np.int32)
+        if codes.ndim != 2 or codes.size == 0:
+            continue
+        # Accepted source layouts:
+        #   [codebooks, frames], used by shangeth/libritts-r-mimi-codes
+        #   [frames, codebooks], used by some tabular pretokenized datasets
+        if codes.shape[0] <= 64 and codes.shape[1] > 0:
+            return codes
+        if codes.shape[1] <= 64 and codes.shape[0] > 0:
+            return codes.T
+    return None
+
+
+def pretokenized_mimi_codes_to_token_frames(codes: np.ndarray) -> list[list[int]]:
+    codes_np = np.asarray(codes, dtype=np.int32)
+    if codes_np.ndim != 2 or codes_np.size == 0:
+        return []
+    return audio_codes_to_token_frames(codes_np)
+
+
+def tokenize_mimi_codes_speech_text(row: dict, spec: dict[str, Any] | None = None) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
+    if not config.enable_audio:
+        raise RuntimeError("Audio mode is disabled")
+    transcript = extract_transcript(row, spec)
+    if not transcript:
+        raise DataQualityError("Pretokenized Mimi row has no transcript")
+
+    codes = extract_mimi_codes_array(row, spec)
+    if codes is None:
+        raise DataQualityError("Pretokenized Mimi row has no codes")
+    audio_ids = pretokenized_mimi_codes_to_token_frames(codes)
+    if not audio_ids:
+        raise DataQualityError("Pretokenized Mimi row produced no codec token frames")
+
+    text_ids = encode_text(transcript)
+    mode = str((spec or {}).get("mode", "mimi_codes_speech_text"))
+    if mode == "mimi_codes_tts":
+        task = "tts"
+    elif mode == "mimi_codes_asr":
+        task = "asr"
+    else:
+        task = choose_audio_task(row, transcript, spec)
+
+    if task == "tts":
+        prompt = format_tts_prompt(transcript)
+        return tokenize_modal_exchange(encode_text(prompt), audio_output_ids(audio_ids))
+
+    if task in {"audio", "audio_audio", "speech"}:
+        user_ids = [token_ids["audio_in"], *audio_ids]
+        return tokenize_modal_exchange(user_ids, audio_output_ids(audio_ids), user_inner_weight=config.listen_loss_weight)
+
+    if task in {"hybrid", "duplex"}:
+        user_ids = [token_ids["audio_in"], *audio_ids]
+        model_ids = hybrid_output_ids(encode_text(f"I heard: {transcript}"), audio_ids)
+        return tokenize_modal_exchange(user_ids, model_ids, user_inner_weight=config.listen_loss_weight)
+
+    user_ids = [token_ids["audio_in"], *audio_ids]
+    return tokenize_modal_exchange(user_ids, text_output_ids(text_ids), user_inner_weight=config.listen_loss_weight)
+
+
 def tokenize_echox_s2s_dialogue(row: dict, spec: dict[str, Any] | None = None) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
     if not config.enable_audio:
         raise RuntimeError("Audio mode is disabled")
@@ -2709,6 +2794,8 @@ def tokenize_row_by_mode(
         return tokenize_plain_text(row, spec)
     if mode == "audio_asr":
         return tokenize_audio_asr(row, spec)
+    if mode in {"mimi_codes_asr", "mimi_codes_tts", "mimi_codes_speech_text"}:
+        return tokenize_mimi_codes_speech_text(row, spec)
     if mode in {"echox_s2s_dialogue", "speech_dialogue"}:
         return tokenize_echox_s2s_dialogue(row, spec)
     raise ValueError(f"Unsupported dataset mode: {mode}")
@@ -2825,7 +2912,7 @@ def pid_is_alive(pid: int) -> bool:
 
 
 def acquire_run_lock() -> None:
-    global _RUN_LOCK_FD, _RUN_LOCK_PATH
+    global _RUN_LOCK_FD, _RUN_LOCK_PATH, _RUN_LOCK_OWNER_PID
     lock_dir = cache_root_path()
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "propagator_train.active.lock"
@@ -2844,6 +2931,7 @@ def acquire_run_lock() -> None:
             os.write(fd, payload.encode("utf-8"))
             _RUN_LOCK_FD = fd
             _RUN_LOCK_PATH = lock_path
+            _RUN_LOCK_OWNER_PID = os.getpid()
             log_info(f"[Lock] Acquired training lock: {lock_path} pid={os.getpid()}")
             return
         except FileExistsError:
@@ -2865,7 +2953,9 @@ def acquire_run_lock() -> None:
 
 
 def release_run_lock() -> None:
-    global _RUN_LOCK_FD, _RUN_LOCK_PATH
+    global _RUN_LOCK_FD, _RUN_LOCK_PATH, _RUN_LOCK_OWNER_PID
+    if _RUN_LOCK_OWNER_PID is not None and os.getpid() != int(_RUN_LOCK_OWNER_PID):
+        return
     if _RUN_LOCK_FD is not None:
         try:
             os.close(_RUN_LOCK_FD)
@@ -2879,6 +2969,7 @@ def release_run_lock() -> None:
         except FileNotFoundError:
             pass
         _RUN_LOCK_PATH = None
+    _RUN_LOCK_OWNER_PID = None
 
 
 atexit.register(release_run_lock)
@@ -2890,6 +2981,61 @@ def terminate_active_pools() -> None:
             pool.terminate()
         except Exception:
             pass
+
+
+def shutdown_pool(pool: Any, *, terminate: bool, timeout: float = 10.0) -> None:
+    workers = list(getattr(pool, "_pool", []) or [])
+    if terminate:
+        for proc in workers:
+            try:
+                pid = int(getattr(proc, "pid", 0) or 0)
+                if pid > 0:
+                    os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        return
+    else:
+        try:
+            pool.close()
+        except Exception:
+            terminate = True
+            for proc in workers:
+                try:
+                    if proc.is_alive():
+                        proc.terminate()
+                except Exception:
+                    pass
+
+    deadline = time.time() + max(0.5, float(timeout))
+    while workers and time.time() < deadline:
+        alive = []
+        for proc in workers:
+            try:
+                proc.join(timeout=0.1)
+                if proc.is_alive():
+                    alive.append(proc)
+            except Exception:
+                pass
+        workers = alive
+        if workers:
+            time.sleep(0.1)
+
+    if workers:
+        log_info(f"[Pool] Forcing exit for {len(workers)} stuck tokenization workers.")
+        for proc in workers:
+            try:
+                if proc.is_alive():
+                    proc.kill()
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        for proc in workers:
+            try:
+                proc.join(timeout=1.0)
+            except Exception:
+                pass
 
 
 def install_signal_handlers() -> None:
@@ -3753,7 +3899,7 @@ def initial_uncapped_chunk_capacity(spec: dict[str, Any] | None, dataset: Any | 
     repeat_count = max(1, int(spec.get("repeat", 1))) if spec else 1
     mode = str(spec.get("mode", config.dataset_mode)) if spec else str(config.dataset_mode)
     if row_count > 0:
-        if mode in {"audio_asr", "echox_s2s_dialogue", "speech_dialogue"} or "audio" in mode:
+        if mode in {"audio_asr", "mimi_codes_asr", "mimi_codes_tts", "mimi_codes_speech_text", "echox_s2s_dialogue", "speech_dialogue"} or "audio" in mode:
             chunks_per_row = max(1, math.ceil(int(config.max_audio_tokens_per_row) / max(1, int(config.train_unroll_len))))
         elif mode == "plain_text":
             chunks_per_row = 32
@@ -4069,11 +4215,9 @@ def tokenize_echox_dataset_sharded(
                 if pending:
                     time.sleep(1.0)
             drain_progress_queue()
-            pool.close()
-            pool.join()
+            shutdown_pool(pool, terminate=False)
         except BaseException:
-            pool.terminate()
-            pool.join()
+            shutdown_pool(pool, terminate=True)
             raise
         finally:
             if pool in _ACTIVE_POOLS:
@@ -4329,7 +4473,7 @@ def tokenize_dataset_rows(
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     cpu_count = os.cpu_count() or 1
-    is_audio = "audio" in row_mode or row_mode in {"audio_asr", "echox_s2s_dialogue", "speech_dialogue"}
+    is_audio = "audio" in row_mode or row_mode in {"audio_asr", "mimi_codes_asr", "mimi_codes_tts", "mimi_codes_speech_text", "echox_s2s_dialogue", "speech_dialogue"}
     if is_audio:
         num_workers = config.audio_preprocessing_workers or min(cpu_count, 32)
         row_batch_size = max(1, int(config.audio_preprocessing_batch_rows)) if int(config.audio_preprocessing_batch_rows) > 0 else max(
@@ -4436,21 +4580,27 @@ def tokenize_dataset_rows(
                 elapsed = max(1e-6, now - last_log_time)
                 rows_per_sec = (source_rows - last_log_rows) / elapsed
                 chunks_per_sec = (actual_count - last_log_chunks) / elapsed
-                if not uncapped and estimated_chunks > 0:
-                    progress_total = min(estimated_chunks, effective_max_chunks)
+                if uncapped and estimated_chunks <= 0:
+                    progress_total = max(1, int(effective_max_chunks))
+                    progress_total_kind = "capacity"
+                elif uncapped:
+                    progress_total = max(int(estimated_chunks), int(actual_count))
+                    progress_total_kind = "estimated"
+                elif estimated_chunks > 0:
+                    progress_total = min(int(estimated_chunks), int(effective_max_chunks))
+                    progress_total_kind = "target"
                 else:
-                    if uncapped and source_rows >= display_progress_total:
-                        display_progress_total = max(
-                            int(display_progress_total * 2),
-                            int(effective_max_chunks),
-                        )
-                    progress_total = max(1, int(display_progress_total))
+                    progress_total = max(1, int(effective_max_chunks))
+                    progress_total_kind = "target"
                 if progress_total > 0:
                     progress_pct = 100.0 * actual_count / max(1, int(progress_total))
                     remaining_chunks = max(0, int(progress_total) - int(actual_count))
                     eta = remaining_chunks / max(1e-6, chunks_per_sec)
                     if uncapped:
-                        progress_text = f"chunks={actual_count}/{int(progress_total)} ({progress_pct:.1f}%)"
+                        progress_text = (
+                            f"chunks={actual_count}/{int(progress_total)} "
+                            f"({progress_pct:.1f}% {progress_total_kind})"
+                        )
                     else:
                         progress_text = (
                             f"chunks={actual_count}/{int(progress_total)} ({progress_pct:.1f}%), "
@@ -4458,7 +4608,7 @@ def tokenize_dataset_rows(
                         )
                 else:
                     eta = 0.0
-                    progress_text = f"chunks={actual_count}"
+                    progress_text = f"chunks={actual_count} capacity={int(effective_max_chunks)}"
                 eta_text = (
                     format_duration(eta) if progress_total > 0 and chunks_per_sec > 0 else "running"
                 )
@@ -4531,11 +4681,7 @@ def tokenize_dataset_rows(
     finally:
         if pool in _ACTIVE_POOLS:
             _ACTIVE_POOLS.remove(pool)
-        if pool_completed and not stop_early:
-            pool.close()
-        else:
-            pool.terminate()
-        pool.join()
+        shutdown_pool(pool, terminate=not (pool_completed and not stop_early))
 
     flush_token_cache_arrays(input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions)
 
@@ -4693,7 +4839,14 @@ def infer_cache_chunk_capacity() -> int:
 
 def component_chunk_targets(specs: list[dict[str, Any]], max_chunks: int) -> list[int]:
     if max_chunks <= 0:
-        return [-1 for _ in specs]
+        targets = []
+        for spec in specs:
+            spec_max_chunks = spec.get("max_chunks")
+            if spec_max_chunks is None:
+                targets.append(-1)
+                continue
+            targets.append(max(1, int(spec_max_chunks)))
+        return targets
 
     raw = [max_chunks * float(spec["weight"]) for spec in specs]
     targets = [int(math.floor(value)) for value in raw]
