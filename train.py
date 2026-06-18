@@ -55,6 +55,33 @@ try:
 except ImportError:
     pass
 
+# Fix Orbax 0.11.39 incompatibility with JAX 0.6.2+ where jax.sharding.set_mesh returns None
+# instead of a context manager. Orbax expects a context manager.
+import jax.sharding
+_original_set_mesh = jax.sharding.set_mesh
+
+
+class _MeshContextManager:
+    def __init__(self, mesh: Any) -> None:
+        self.mesh = mesh
+        self.previous: Any | None = None
+
+    def __enter__(self) -> Any:
+        self.previous = _original_set_mesh(self.mesh)
+        return self.mesh
+
+    def __exit__(self, exc_type: type[Any] | None, exc: BaseException | None, tb: Any | None) -> bool:
+        _ = _original_set_mesh(self.previous)
+        return False
+
+
+def _set_mesh_compat_patch(mesh):
+    result = _original_set_mesh(mesh)
+    if hasattr(result, "__enter__") and hasattr(result, "__exit__"):
+        return result
+    return _MeshContextManager(mesh)
+jax.sharding.set_mesh = _set_mesh_compat_patch
+
 load_dotenv()
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -544,6 +571,7 @@ class PropagatorConfig(BaseSettings):
     eval_audio_input_audio_tokens: int = 512
     audio_eval_normalize_rms: float = 0.06
     audio_eval_peak_limit: float = 0.95
+    asr_eval_case_fold: bool = False
     audio_low_rms_threshold: float = 0.005
     audio_token_loss_weight: float = 1.0
     audio_codebook_loss_weight: float = 1.0
@@ -775,6 +803,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-audio-input-text-tokens", type=int)
     parser.add_argument("--eval-audio-input-audio-seconds", type=float)
     parser.add_argument("--eval-audio-input-audio-tokens", type=int)
+    parser.add_argument("--asr-eval-case-fold", action="store_true")
+    parser.add_argument("--no-asr-eval-case-fold", action="store_true")
     parser.add_argument("--audio-eval-normalize-rms", type=float)
     parser.add_argument("--audio-eval-peak-limit", type=float)
     parser.add_argument("--audio-low-rms-threshold", type=float)
@@ -865,6 +895,10 @@ def build_config() -> PropagatorConfig:
         updates["require_byte_level_bpe"] = False
     if raw_updates.get("no_write_edge_report"):
         updates["write_edge_report"] = False
+    if raw_updates.get("asr_eval_case_fold"):
+        updates["asr_eval_case_fold"] = True
+    if raw_updates.get("no_asr_eval_case_fold"):
+        updates["asr_eval_case_fold"] = False
 
     for key in (
         "no_streaming",
@@ -884,6 +918,8 @@ def build_config() -> PropagatorConfig:
         "no_save_augmented_tokenizer",
         "no_require_byte_level_bpe",
         "no_write_edge_report",
+        "asr_eval_case_fold",
+        "no_asr_eval_case_fold",
     ):
         updates.pop(key, None)
 
@@ -1762,8 +1798,8 @@ def get_audio_codec() -> dict[str, Any] | None:
     if _audio_codec_error is not None:
         return None
 
-    try:
-        if config.audio_backend == "mimi":
+    if config.audio_backend == "mimi":
+        try:
             import rustymimi
             from huggingface_hub import hf_hub_download
 
@@ -1782,7 +1818,17 @@ def get_audio_codec() -> dict[str, Any] | None:
             )
             _audio_codec = {"backend": "mimi", "model": model, "model_path": model_path}
             return _audio_codec
+        except Exception as exc:
+            _audio_codec_error = f"{type(exc).__name__}: {exc}"
+            raise RuntimeError(
+                "[Audio] Mimi backend unavailable for requested --audio-backend=mimi; install rustymimi or use --audio-backend encodec. "
+                f"Error: {_audio_codec_error}"
+            ) from exc
 
+    if config.audio_backend != "encodec":
+        return None
+
+    try:
         import torch
         from encodec import EncodecModel
         from encodec.utils import convert_audio
@@ -1798,14 +1844,14 @@ def get_audio_codec() -> dict[str, Any] | None:
         model.set_target_bandwidth(6.0)
         model.eval()
         _audio_codec = {"backend": "encodec", "torch": torch, "model": model, "convert_audio": convert_audio}
+        _audio_codec_error = None
         return _audio_codec
     except Exception as exc:
         _audio_codec_error = f"{type(exc).__name__}: {exc}"
-        log_info(
-            f"[Audio] {config.audio_backend} backend unavailable; audio rows/eval decode will be skipped: "
-            f"{_audio_codec_error}"
-        )
-        return None
+        raise RuntimeError(
+            "[Audio] Encodec backend unavailable for requested --audio-backend=encodec. "
+            f"Audio will be unavailable for this run. Error: {_audio_codec_error}"
+        ) from exc
 
 
 def audio_codes_to_token_frames(codes_np: np.ndarray) -> list[list[int]]:
@@ -6094,7 +6140,10 @@ def decode_text_token_ids_for_eval(ids: list[int]) -> str:
         for token_id in ids
         if 0 <= int(token_id) < text_vocab_size and int(token_id) not in control_token_ids()
     ]
-    return tokenizer.decode(text_ids, skip_special_tokens=True).strip()
+    text = tokenizer.decode(text_ids, skip_special_tokens=True).strip()
+    if getattr(config, "asr_eval_case_fold", False):
+        text = text.lower()
+    return text
 
 
 def collect_audio_target_tokens(target_frames: np.ndarray) -> list[int]:
