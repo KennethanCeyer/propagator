@@ -1,3 +1,3 @@
 #!/bin/bash
-FOREGROUND=true
-/home/user/propagator/scripts/train.sh --foreground
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+"$SCRIPT_DIR/scripts/train.sh" "$@"

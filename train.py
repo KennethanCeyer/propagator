@@ -631,6 +631,7 @@ batch_sharding: NamedSharding | None = None
 vector_sharding: NamedSharding | None = None
 memory_sharding: NamedSharding | None = None
 replicated_sharding: NamedSharding | None = None
+data_mesh: Mesh | None = None
 
 train_input_tokens: np.ndarray
 train_target_tokens: np.ndarray
@@ -5600,8 +5601,7 @@ def train_step_stateless(
     return ce_loss
 
 
-@functools.partial(nnx.jit, donate_argnums=(2, 3, 4, 5, 6))
-def train_step_stateful(
+def _train_step_stateful_impl(
     model: PropagatorModel,
     optimizer: nnx.Optimizer,
     inputs: jax.Array,
@@ -5628,8 +5628,83 @@ def train_step_stateful(
     return ce_loss, final_memories
 
 
-@nnx.jit
-def validation_step_stateful(
+def build_train_step_stateful() -> Any:
+    if batch_sharding is None or vector_sharding is None or memory_sharding is None:
+        if data_mesh is None:
+            return nnx.jit(_train_step_stateful_impl, donate_argnums=(2, 3, 4, 5, 6))
+        with jax.sharding.set_mesh(data_mesh):
+            return nnx.jit(_train_step_stateful_impl, donate_argnums=(2, 3, 4, 5, 6))
+    memory_shardings = tuple(memory_sharding for _ in range(config.num_layers))
+    if data_mesh is None:
+        return nnx.jit(
+            _train_step_stateful_impl,
+            in_shardings=(
+                None,
+                None,
+                batch_sharding,
+                batch_sharding,
+                batch_sharding,
+                memory_shardings,
+                vector_sharding,
+                vector_sharding,
+            ),
+            out_shardings=(None, memory_shardings),
+            donate_argnums=(2, 3, 4, 5, 6),
+        )
+    with jax.sharding.set_mesh(data_mesh):
+        return nnx.jit(
+            _train_step_stateful_impl,
+            in_shardings=(
+                None,
+                None,
+                batch_sharding,
+                batch_sharding,
+                batch_sharding,
+                memory_shardings,
+                vector_sharding,
+                vector_sharding,
+            ),
+            out_shardings=(None, memory_shardings),
+            donate_argnums=(2, 3, 4, 5, 6),
+        )
+
+
+def call_train_step_stateful(
+    train_step_stateful_fn: Any,
+    model: PropagatorModel,
+    optimizer: nnx.Optimizer,
+    batch_inputs: jax.Array,
+    batch_targets: jax.Array,
+    batch_weights: jax.Array,
+    carry_memories: tuple[jax.Array, ...],
+    reset_mask: jax.Array,
+    chunk_positions: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, ...]]:
+    if data_mesh is None:
+        return train_step_stateful_fn(
+            model,
+            optimizer,
+            batch_inputs,
+            batch_targets,
+            batch_weights,
+            carry_memories,
+            reset_mask,
+            chunk_positions,
+        )
+    with jax.sharding.set_mesh(data_mesh):
+        return train_step_stateful_fn(
+            model,
+            optimizer,
+            batch_inputs,
+            batch_targets,
+            batch_weights,
+            carry_memories,
+            reset_mask,
+            chunk_positions,
+        )
+
+
+def _validation_step_stateful_impl(
     model: PropagatorModel,
     inputs: jax.Array,
     targets: jax.Array,
@@ -5649,6 +5724,81 @@ def validation_step_stateful(
         task_ids=task_ids,
     )
     return ce_loss, final_memories, metrics
+
+
+def build_validation_step_stateful() -> Any:
+    if batch_sharding is None or vector_sharding is None or memory_sharding is None:
+        if data_mesh is None:
+            return nnx.jit(_validation_step_stateful_impl)
+        with jax.sharding.set_mesh(data_mesh):
+            return nnx.jit(_validation_step_stateful_impl)
+    memory_shardings = tuple(memory_sharding for _ in range(config.num_layers))
+    metrics_shardings = tuple(None for _ in range(VALIDATION_METRIC_SIZE))
+    if data_mesh is None:
+        return nnx.jit(
+            _validation_step_stateful_impl,
+            in_shardings=(
+                None,
+                batch_sharding,
+                batch_sharding,
+                batch_sharding,
+                memory_shardings,
+                vector_sharding,
+                vector_sharding,
+                vector_sharding,
+            ),
+            out_shardings=(None, memory_shardings, metrics_shardings),
+        )
+    with jax.sharding.set_mesh(data_mesh):
+        return nnx.jit(
+            _validation_step_stateful_impl,
+            in_shardings=(
+                None,
+                batch_sharding,
+                batch_sharding,
+                batch_sharding,
+                memory_shardings,
+                vector_sharding,
+                vector_sharding,
+                vector_sharding,
+            ),
+            out_shardings=(None, memory_shardings, metrics_shardings),
+        )
+
+
+def run_validation_step_stateful(
+    validation_step_stateful_fn: Any,
+    model: PropagatorModel,
+    batch_inputs: jax.Array,
+    batch_targets: jax.Array,
+    batch_weights: jax.Array,
+    memories: tuple[jax.Array, ...],
+    reset_mask: jax.Array,
+    chunk_positions: jax.Array,
+    task_ids: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, ...], tuple[jax.Array, ...]]:
+    if data_mesh is None:
+        return validation_step_stateful_fn(
+            model,
+            batch_inputs,
+            batch_targets,
+            batch_weights,
+            memories,
+            reset_mask,
+            chunk_positions,
+            task_ids,
+        )
+    with jax.sharding.set_mesh(data_mesh):
+        return validation_step_stateful_fn(
+            model,
+            batch_inputs,
+            batch_targets,
+            batch_weights,
+            memories,
+            reset_mask,
+            chunk_positions,
+            task_ids,
+        )
 
 
 @nnx.jit
@@ -6835,7 +6985,11 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
     }
 
 
-def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, float]]:
+def run_validation(
+    model: PropagatorModel,
+    step: int,
+    validation_step_stateful_fn: Any,
+) -> tuple[float, dict[str, float]]:
     losses = []
     metric_sums = np.zeros((VALIDATION_METRIC_SIZE,), dtype=np.float64)
 
@@ -6863,7 +7017,8 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
             task_ids = maybe_put_vector(task_ids_np, np.int32)
 
-            ce_loss, memories, metrics = validation_step_stateful(
+            ce_loss, memories, metrics = run_validation_step_stateful(
+                validation_step_stateful_fn,
                 model,
                 batch_inputs,
                 batch_targets,
@@ -6892,7 +7047,8 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
             task_ids = maybe_put_vector(task_ids_np, np.int32)
 
-            ce_loss, _, metrics = validation_step_stateful(
+            ce_loss, _, metrics = run_validation_step_stateful(
+                validation_step_stateful_fn,
                 model,
                 batch_inputs,
                 batch_targets,
@@ -6913,7 +7069,8 @@ def run_validation(model: PropagatorModel, step: int) -> tuple[float, dict[str, 
         for i in range(int(config.validation_control_batches)):
             batch_inputs, batch_targets, batch_weights, reset_mask, chunk_positions, task_ids = get_validation_control_batch(step + i)
             memories = initial_memories_for_training(model, config.batch_size)
-            ce_loss, _, metrics = validation_step_stateful(
+            ce_loss, _, metrics = run_validation_step_stateful(
+                validation_step_stateful_fn,
                 model,
                 batch_inputs,
                 batch_targets,
@@ -7068,7 +7225,7 @@ _backup_threads: list[threading.Thread] = []
 
 
 def configure_runtime_environment() -> None:
-    global batch_sharding, vector_sharding, memory_sharding
+    global batch_sharding, vector_sharding, memory_sharding, data_mesh
     cpu_count = max(1, os.cpu_count() or 1)
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     os.environ.setdefault("RAYON_NUM_THREADS", str(cpu_count))
@@ -7090,12 +7247,13 @@ def configure_runtime_environment() -> None:
             log_info(f"JAX distributed initialization skipped: {exc}")
 
     if config.enable_data_sharding and len(devices) > 1 and config.batch_size % len(devices) == 0:
-        mesh = Mesh(np.asarray(devices), (config.data_axis_name,))
-        batch_sharding = NamedSharding(mesh, P(config.data_axis_name, None))
-        vector_sharding = NamedSharding(mesh, P(config.data_axis_name))
-        memory_sharding = NamedSharding(mesh, P(config.data_axis_name, None, None))
+        data_mesh = Mesh(np.asarray(devices), (config.data_axis_name,))
+        batch_sharding = NamedSharding(data_mesh, P(config.data_axis_name, None))
+        vector_sharding = NamedSharding(data_mesh, P(config.data_axis_name))
+        memory_sharding = NamedSharding(data_mesh, P(config.data_axis_name, None, None))
         log_info(f"Enabled data-axis sharding across {len(devices)} devices")
     else:
+        data_mesh = None
         batch_sharding = None
         vector_sharding = None
         memory_sharding = None
@@ -7299,19 +7457,7 @@ def parse_gcs_backup_base() -> tuple[str, str]:
     if not raw:
         raw = os.environ.get("GCS_BACKUP_DIR", "").strip()
     if not raw:
-        project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT")
-        if not project:
-            gcloud = shutil.which("gcloud")
-            if gcloud:
-                result = subprocess.run(
-                    [gcloud, "config", "get-value", "project"],
-                    text=True,
-                    capture_output=True,
-                )
-                if result.returncode == 0:
-                    project = result.stdout.strip()
-        bucket = "propagator" if not project else f"propagator-{project}"
-        raw = f"gs://{bucket}/{TRAINING_RUN_NAME}"
+        raise RuntimeError("GCS backup target is not configured; set GCS_BACKUP_DIR or --gcs-backup-dir")
 
     if raw.startswith("/gcs/"):
         return "", str(Path(raw))
@@ -7332,6 +7478,10 @@ def parse_gcs_backup_target(step: int) -> tuple[str, str]:
     if base_target.startswith("gs://"):
         return bucket, f"{base_target.rstrip('/')}/sync_step_{step}"
     return bucket, str(Path(base_target) / f"sync_step_{step}")
+
+
+def gcs_backup_enabled() -> bool:
+    return bool((config.gcs_backup_dir or os.environ.get("GCS_BACKUP_DIR", "")).strip())
 
 
 def create_gcs_bucket_if_needed(bucket: str) -> None:
@@ -7762,10 +7912,14 @@ def main() -> None:
         train_sampler = None
         carry_memories = None
 
+    train_step_stateful_fn = build_train_step_stateful()
+    validation_step_stateful_fn = build_validation_step_stateful()
+
     pbar = progress_bar(range(start_step, total_steps), desc="Training", initial=start_step, total=total_steps)
     train_wall_start = time.time()
     last_train_log_time = train_wall_start
     last_train_log_step = start_step
+    sharding_retry_count = 0
 
     for step in pbar:
         should_early_stop = False
@@ -7795,16 +7949,34 @@ def main() -> None:
             batch_weights = maybe_put_batch(batch_weights_np, np.float32)
             reset_mask = maybe_put_vector(reset_mask_np, np.bool_)
             chunk_positions = maybe_put_vector(chunk_positions_np, np.int32)
-            ce_loss_val, carry_memories = train_step_stateful(
-                model,
-                optimizer,
-                batch_inputs,
-                batch_targets,
-                batch_weights,
-                carry_memories,
-                reset_mask,
-                chunk_positions,
-            )
+            for attempt in (0, 1):
+                try:
+                    ce_loss_val, carry_memories = call_train_step_stateful(
+                        train_step_stateful_fn,
+                        model,
+                        optimizer,
+                        batch_inputs,
+                        batch_targets,
+                        batch_weights,
+                        carry_memories,
+                        reset_mask,
+                        chunk_positions,
+                    )
+                    break
+                except ValueError as exc:
+                    msg = str(exc)
+                    is_jit_sharding_error = (
+                        "Sharding passed to pjit does not match the sharding on the respective arg." in msg
+                        or "Received incompatible devices for jitted computation." in msg
+                    )
+                    if (not is_jit_sharding_error) or attempt == 1:
+                        raise
+                    sharding_retry_count += 1
+                    log_info(
+                        f"[Train] Retrying stateful step at global step {step} after jit sharding mismatch "
+                        f"#{sharding_retry_count}: {msg.splitlines()[0]}"
+                    )
+                    train_step_stateful_fn = build_train_step_stateful()
         else:
             batch_inputs, batch_targets, batch_weights = get_random_batch(step, shuffled)
             ce_loss_val = train_step_stateless(model, optimizer, batch_inputs, batch_targets, batch_weights)
@@ -7841,7 +8013,23 @@ def main() -> None:
             last_train_log_step = act_step
 
         if act_step % config.eval_every == 0:
-            v_loss, v_metrics = run_validation(model, act_step)
+            for attempt in (0, 1):
+                try:
+                    v_loss, v_metrics = run_validation(model, act_step, validation_step_stateful_fn)
+                    break
+                except ValueError as exc:
+                    msg = str(exc)
+                    is_jit_sharding_error = (
+                        "Sharding passed to pjit does not match the sharding on the respective arg." in msg
+                        or "Received incompatible devices for jitted computation." in msg
+                    )
+                    if (not is_jit_sharding_error) or attempt == 1:
+                        raise
+                    validation_step_stateful_fn = build_validation_step_stateful()
+                    log_info(
+                        f"[Validation] Retrying stateful validation at global step {act_step} after jit sharding mismatch "
+                        f"#{attempt + 1}: {msg.splitlines()[0]}"
+                    )
 
             if v_loss < best_early_stop_loss - float(config.early_stopping_min_delta):
                 best_early_stop_loss = v_loss
@@ -7971,7 +8159,9 @@ def main() -> None:
             ckpt_dir = output_root / f"step_{act_step}"
             save_checkpoint(checkpointer, model, optimizer, ckpt_dir)
             checkpoint_backup_ok = True
-            if config.gcs_sync_every > 0 and (act_step % config.gcs_sync_every == 0 or should_early_stop):
+            if gcs_backup_enabled() and config.gcs_sync_every > 0 and (
+                act_step % config.gcs_sync_every == 0 or should_early_stop
+            ):
                 try:
                     sync_checkpoint_to_gcs(act_step, ckpt_dir)
                 except Exception as exc:
@@ -7982,7 +8172,9 @@ def main() -> None:
             else:
                 log_info("[Checkpoint] Local checkpoint pruning skipped because GCS checkpoint backup failed")
 
-        if config.gcs_sync_every > 0 and (act_step % config.gcs_sync_every == 0 or should_early_stop):
+        if gcs_backup_enabled() and config.gcs_sync_every > 0 and (
+            act_step % config.gcs_sync_every == 0 or should_early_stop
+        ):
             start_gcs_backup(act_step, output_root / f"step_{act_step}")
 
         if should_early_stop:
