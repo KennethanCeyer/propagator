@@ -272,20 +272,20 @@ The reported CE is a weighted multimodal objective, not a plain text perplexity.
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Latest completed eval at step 440,000:
+Latest completed eval at step 140,000:
 
 | Metric | Value |
 | :--- | ---: |
-| Train weighted CE | 34.74 |
-| Validation weighted CE | 52.75 |
-| Best validation weighted CE so far | 44.26 at step 335,000 |
-| Decision accuracy | 98.82% |
-| Listen accuracy | 99.10% |
-| User-end accuracy | 63.57% |
-| Model-end accuracy | 63.89% |
-| Text token accuracy | 39.62% |
-| Audio token accuracy | 35.51% |
-| Audio codebook exact accuracy | 1.93% |
+| Train weighted CE | 3.42 |
+| Validation weighted CE | 3.83 |
+| Best validation weighted CE so far | 3.83 at step 140,000 |
+| Decision accuracy | 94.25% |
+| Listen accuracy | 94.51% |
+| User-end accuracy | 75.13% |
+| Model-end accuracy | 75.48% |
+| Text token accuracy | 34.55% |
+| Audio token accuracy | 36.56% |
+| Audio codebook exact accuracy | 0.04% |
 
 ### Protocol and Modality
 
@@ -307,7 +307,7 @@ Latest completed eval at step 440,000:
 
 ## Output Examples
 
-These examples are from the step 440,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
+These examples are from the step 140,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
 
 ### Identity Prompt
 
