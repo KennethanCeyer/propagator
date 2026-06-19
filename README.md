@@ -21,9 +21,7 @@ The current experimental run is a multimodal duplex model trained on text dialog
 
 ## Current Snapshot
 
-Latest audited evaluation before the current restart: step 790,000 from the previous multimodal run; the latest completed recovery checkpoint at audit time was step 780,000.
-
-The detailed failure analysis and restart decision are in [`TRAINING_AUDIT_790K.md`](TRAINING_AUDIT_790K.md).
+The latest audited checkpoint published in this README is step 145,000 for the current multimodal run.
 
 | Item | Value |
 | :--- | :--- |
@@ -272,19 +270,19 @@ The reported CE is a weighted multimodal objective, not a plain text perplexity.
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Latest completed eval at step 140,000:
+Latest completed eval at step 145,000:
 
 | Metric | Value |
 | :--- | ---: |
-| Train weighted CE | 3.42 |
+| Train weighted CE | 3.45 |
 | Validation weighted CE | 3.83 |
-| Best validation weighted CE so far | 3.83 at step 140,000 |
-| Decision accuracy | 94.25% |
-| Listen accuracy | 94.51% |
-| User-end accuracy | 75.13% |
-| Model-end accuracy | 75.48% |
-| Text token accuracy | 34.55% |
-| Audio token accuracy | 36.56% |
+| Best validation weighted CE so far | 3.83 at step 145,000 |
+| Decision accuracy | 90.11% |
+| Listen accuracy | 90.27% |
+| User-end accuracy | 78.24% |
+| Model-end accuracy | 71.97% |
+| Text token accuracy | 34.48% |
+| Audio token accuracy | 37.45% |
 | Audio codebook exact accuracy | 0.04% |
 
 ### Protocol and Modality
@@ -307,7 +305,7 @@ Latest completed eval at step 140,000:
 
 ## Output Examples
 
-These examples are from the step 140,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
+These examples are from the step 145,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
 
 ### Identity Prompt
 
