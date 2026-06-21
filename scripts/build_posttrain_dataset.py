@@ -1,118 +1,359 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
+import random
 from pathlib import Path
 
 
-NAMES = [
-    "amber",
-    "cobalt",
-    "delta",
-    "ember",
-    "frost",
-    "garnet",
-    "harbor",
-    "indigo",
-    "jade",
-    "kepler",
+SEED = 20260620
+
+NAMES = ["Mina", "Jonah", "Priya", "Luis", "Hana", "Omar", "Elena", "Noah", "Rafi", "Maya", "Sofia", "Nia", "Leo"]
+CITIES = ["Boston", "Lima", "Seoul", "Oslo", "Nairobi", "Lisbon", "Toronto", "Kyoto", "Helsinki", "Valencia"]
+OBJECTS = ["receipt", "notebook", "blue mug", "library card", "train ticket", "grocery bag", "garden glove", "bus pass", "tea cup", "label", "camera lens"]
+PLACES = ["kitchen", "library", "museum", "market", "train station", "guest room", "courtyard", "bookshop", "clinic", "studio", "studio hallway"]
+EVENTS = ["book club", "family lunch", "ticket pickup", "gallery walk", "market errand", "study session", "team standup", "maintenance check"]
+MOODS = ["calm", "busy", "curious", "careful", "hopeful", "tired", "focused", "relieved"]
+DOMAINS = ["home planning", "travel", "food", "arts", "customer support", "education", "community events", "personal organization", "retail", "reading", "weather planning"]
+ADJECTIVES = ["quiet", "bright", "rainy", "early", "crowded", "warm", "formal", "casual", "shared", "local", "weekly", "small"]
+DAYS = list(range(1, 29))
+HOURS = list(range(8, 20))
+
+SCENE_OBJECTS = [
+    "a red mug",
+    "a receipt",
+    "a notebook",
+    "blue keys",
+    "a library card",
+    "a train ticket",
+    "a grocery bag",
+    "a small shovel",
+    "a coffee mug",
+    "a shopping cart",
+    "a stack of books",
 ]
 
-TOPICS = [
-    ("matrix memory", "a fixed-size associative matrix that stores key-value traces"),
-    ("delta update", "an error-correcting write that moves a stored value toward the new target"),
-    ("streaming inference", "processing one chunk at a time while carrying recurrent memory forward"),
-    ("turn taking", "predicting whether to keep listening, end the user turn, or start the model response"),
-    ("audio tokens", "codec codebook ids carried beside text and protocol tokens"),
-    ("RMSNorm", "normalizing by root mean square to stabilize hidden activations"),
-    ("SwiGLU", "a gated feed-forward path that keeps useful channels and suppresses weak ones"),
-    ("grouped memory reads", "splitting associative keys into groups so each group can retrieve a different value slice"),
-    ("RoPE-style phase", "rotating memory keys by stream position so order is visible without a KV cache"),
-    ("quantization", "storing trained weights in fewer bits for edge serving"),
+FORMAT_CATALOG = [
+    "json",
+    "yaml",
+    "one_word",
+    "two_bullets",
+    "csv",
+    "label_value",
 ]
 
-EDGE_FACTS = [
-    "Use a compact preset before quantization; quantization reduces weights but not every runtime buffer.",
-    "The recurrent matrix is constant-size per layer, so serving memory does not grow linearly with prompt length.",
-    "A 4-bit export should still reserve space for embeddings, recurrent state, temporary logits, and framework overhead.",
-    "For a 2 GB target, prefer smaller hidden size, fewer layers, and grouped memory before relying on quantization alone.",
+ARCHIVE_BIAS = [
+    "science",
+    "math",
+    "engineering",
+    "physics",
 ]
 
-def row(user: str, assistant: str, *, interrupt: bool = False) -> dict:
-    result = {
+
+def with_request_id(idx: int, prompt: str) -> str:
+    return f"Request {idx:05d}. {prompt}"
+
+
+def row_json(*, idx: int, user: str, assistant: str, task: str | None = None, interrupt: bool = False) -> dict:
+    payload: dict[str, object] = {
         "output": [
-            {"role": "user", "content": user},
+            {"role": "user", "content": with_request_id(idx, user)},
             {"role": "assistant", "content": assistant},
         ]
     }
+    if task:
+        payload["task"] = task
     if interrupt:
-        result["allow_user_interrupts"] = True
-    return result
+        payload["allow_user_interrupts"] = True
+    return payload
 
 
-def build_rows(count: int) -> list[dict]:
+def image_row(*, idx: int, image_text: str, question: str, answer: str, task: str | None = None) -> dict:
+    payload: dict[str, object] = {
+        "image_text": image_text,
+        "question": question,
+        "answer": answer,
+        "image_text_key": "image_text",
+    }
+    if task:
+        payload["task"] = task
+    payload["question"] = with_request_id(idx, question)
+    return payload
+
+
+def sample_from(pool: list[str], rng: random.Random) -> str:
+    return pool[rng.randrange(len(pool))]
+
+
+def text_format_rows(rng: random.Random, start: int, count: int) -> list[dict]:
     rows: list[dict] = []
-    for i in range(count):
-        kind = i % 20
-        name = NAMES[i % len(NAMES)]
-        topic, definition = TOPICS[i % len(TOPICS)]
-        other_topic, other_definition = TOPICS[(i * 7 + 3) % len(TOPICS)]
-
-        if kind == 0:
-            rows.append(row("What is your name?", "My name is Propagator."))
-        elif kind == 1:
-            rows.append(row("In one sentence, what is Propagator?", "Propagator is a streaming language and speech architecture that carries context in fixed-size recurrent matrix memory instead of a growing KV cache."))
-        elif kind == 2:
-            rows.append(row(f"Explain {topic} for this model.", f"In Propagator, {topic} means {definition}."))
-        elif kind == 3:
-            rows.append(row(f"Compare {topic} and {other_topic}.", f"{topic} is {definition}, while {other_topic} is {other_definition}."))
-        elif kind == 4:
-            rows.append(row(f"The code word is {name}. Repeat only the code word.", name))
-        elif kind == 5:
-            rows.append(row(f"Remember this setting: memory key group {i % 8}. What group did I give?", f"You gave memory key group {i % 8}."))
-        elif kind == 6:
-            rows.append(row("During user input, should the model answer immediately?", "No. During user input it should usually predict [LISTEN] and update memory until the turn boundary is clear."))
-        elif kind == 7:
-            rows.append(row("What should happen after [USER_END]?", "The model should transition into response mode, usually through [MODEL] and then an output modality token such as [TEXT_OUT] or [AUDIO_OUT]."))
-        elif kind == 8:
-            rows.append(row("Why keep a matrix memory instead of a KV cache?", "A matrix memory gives constant-size recurrent state per layer, which is useful for streaming and edge serving, though it compresses history lossily."))
-        elif kind == 9:
-            rows.append(row("Give a short checklist for edge serving.", "Choose the compact architecture, quantize weights, budget recurrent state, cap batch size, and test generation latency on the target device."))
-        elif kind == 10:
-            fact = EDGE_FACTS[i % len(EDGE_FACTS)]
-            rows.append(row("Give one practical SL2610 deployment note.", fact))
-        elif kind == 11:
-            rows.append(row("How does the delta rule update memory?", "It reads the old value, computes the error against the target value, and writes a scaled outer-product correction into the matrix."))
-        elif kind == 12:
-            rows.append(row("Why add grouped associative reads?", "Grouped reads let separate key groups retrieve separate value slices, improving capacity without introducing token-length attention state."))
-        elif kind == 13:
-            rows.append(row("Why add a RoPE-style phase to recurrent memory keys?", "It gives read and write keys an order-dependent phase, so the fixed matrix can encode position signals without storing every token."))
-        elif kind == 14:
-            rows.append(row("What does SwiGLU improve?", "SwiGLU gives the feed-forward path a multiplicative gate, often improving useful channel selection for the same recurrent interface."))
-        elif kind == 15:
-            rows.append(row("What is the role of MoE here?", "MoE routes each step through a small set of feed-forward experts, increasing conditional capacity while keeping the recurrent memory design unchanged."))
-        elif kind == 16:
-            rows.append(row("What language should this post-training set emphasize?", "This post-training set is English-only and should concentrate on English instruction following, recall, and streaming control."))
-        elif kind == 17:
-            rows.append(row("Answer in exactly three words: fixed matrix memory", "fixed matrix memory"))
-        elif kind == 18:
-            rows.append(row("Summarize the README goal in one sentence.", "The goal is a streaming multimodal model that stores context in persistent matrix memory for constant-size inference state."))
+    for i in range(start, start + count):
+        name = sample_from(NAMES, rng)
+        city = sample_from(CITIES, rng)
+        day = sample_from(DAYS, rng)
+        place = sample_from(PLACES, rng)
+        obj = sample_from(OBJECTS, rng)
+        ref = 1_000 + i
+        fmt = sample_from(FORMAT_CATALOG, rng)
+        if fmt == "json":
+            user = f"Return JSON only with keys person and city. Note {ref}: {name} is heading to {city} on July {day} from {place}."
+            assistant = json.dumps({"person": name, "city": city}, ensure_ascii=False)
+            task = "format_json"
+        elif fmt == "yaml":
+            user = f"Return YAML only with keys task and place. Note {ref}: {name} is at {place} for a meeting."
+            assistant = f"task: {name}\nplace: {place}"
+            task = "format_yaml"
+        elif fmt == "one_word":
+            user = f"Answer with exactly one lowercase word for note {ref}: is the package count for {name} on {day} positive?"
+            assistant = "yes"
+            task = "format_one_word"
+        elif fmt == "two_bullets":
+            user = f"Give exactly two bullet points for preparing a {obj} for a {name} visit on {day}."
+            assistant = f"- Prepare a clear list.\n- Bring the {obj}."
+            task = "format_bullets"
+        elif fmt == "csv":
+            a = rng.randint(1, 9)
+            b = rng.randint(1, 9)
+            user = f"Return CSV with columns item,count for note {ref}: {a} notebooks and {b} receipts."
+            assistant = f"item,count\nnotebook,{a}\nreceipt,{b}"
+            task = "format_csv"
         else:
-            rows.append(row("Actually, stop and answer the new question: what are you?", "I am Propagator, a recurrent matrix-memory streaming model.", interrupt=True))
+            val = sample_from(MOODS, rng)
+            user = f"Reply as mood=value only. In note {ref}, the current mood is {val}."
+            assistant = f"mood={val}"
+            task = "format_label_value"
+        rows.append(row_json(idx=i, user=user, assistant=assistant, task=task))
     return rows
 
 
+def extraction_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        name = sample_from(NAMES, rng)
+        city = sample_from(CITIES, rng)
+        obj = sample_from(OBJECTS, rng)
+        place = sample_from(PLACES, rng)
+        ref = 2_000 + i
+        user = f"Extract person, object, location from note {ref}: {name} left a {obj} at {place} while travelling to {city}."
+        assistant = f"person: {name}\nobject: {obj}\nplace: {place}"
+        rows.append(row_json(idx=i, user=user, assistant=assistant, task="extraction"))
+    return rows
+
+
+def control_and_memory_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        name = sample_from(NAMES, rng)
+        city = sample_from(CITIES, rng)
+        obj = sample_from(OBJECTS, rng)
+        ref = 3_000 + i
+        if i % 3 == 0:
+            user = f"Repeat this exact code word only: code-{i:04d}. Do not explain."
+            assistant = f"code-{i:04d}"
+            task = "short_recall"
+        elif i % 3 == 1:
+            user = f"For note {ref}, write one lowercase word only and do not add anything else: is {obj} in {city}?"
+            assistant = "yes"
+            task = "format_one_word"
+        else:
+            user = f"Remember this sentence for later: {name} goes to {city} on July {sample_from(DAYS, rng)}."
+            assistant = f"I will remember: {name} goes to {city}."
+            task = "delayed_format_recall"
+        rows.append(row_json(idx=i, user=user, assistant=assistant, task=task))
+    return rows
+
+
+def arithmetic_and_classification_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        name = sample_from(NAMES, rng)
+        a = rng.randint(1, 8)
+        b = rng.randint(0, 8)
+        place = sample_from(PLACES, rng)
+        hour = sample_from(HOURS, rng)
+        ref = 4_000 + i
+        if i % 2 == 0:
+            user = f"Count math: In {name}'s plan on July {ref % 28 + 1}, add {a} notes and remove {b}. Give one integer."
+            assistant = str(a + b)
+            task = "arithmetic"
+        else:
+            mode = sample_from(["praise", "complaint", "question", "neutral"], rng)
+            prompt = f"The package with {obj_phrase(a, b)} arrived at {place} by {hour}:00."
+            user = f"Classify tone for note {ref}: {prompt}"
+            assistant = mode
+            task = "classification"
+        rows.append(row_json(idx=i, user=user, assistant=assistant, task=task))
+    return rows
+
+
+def obj_phrase(a: int, b: int) -> str:
+    return f"{a} + {b} items"
+
+
+def image_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        place = sample_from(PLACES, rng)
+        obj = sample_from(SCENE_OBJECTS, rng)
+        mood = sample_from(MOODS, rng)
+        city = sample_from(CITIES, rng)
+        day = sample_from(DAYS, rng)
+        hour = sample_from(HOURS, rng)
+        detail = sample_from(["chair", "lamp", "package", "door", "sign", "ticket gate"], rng)
+        image_text = f"{mood} {place} scene with {obj} and a {detail}."
+        question = f"What is the visible object in image note {i}? include only the object name."
+        answer = obj.split()[1] if " " in obj else obj
+        if i % 2 == 0:
+            rows.append(image_row(idx=i, image_text=image_text, question=question, answer=answer, task="image_recognition"))
+        else:
+            rows.append(
+                {
+                    "image_text": image_text,
+                    "question": f"In this image note {i}, where is the {detail}? choose: {place} / hallway / storage.",
+                    "answer": place,
+                    "task": "image_scene_reasoning",
+                }
+            )
+    return rows
+
+
+def text_image_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        noun = sample_from(OBJECTS, rng)
+        place = sample_from(PLACES, rng)
+        city = sample_from(CITIES, rng)
+        image_text = f"A {sample_from(ADJECTIVES, rng)} {noun} is visible near a {place} counter in {city}."
+        user = f"From the image notes and caption: what object should be brought home?"
+        if i % 3 == 0:
+            question = "Answer with one lowercase word only."
+            answer = noun.split()[0]
+        elif i % 3 == 1:
+            question = "Answer with one location word only."
+            answer = place
+        else:
+            question = "Answer with a short noun phrase."
+            answer = f"{noun} in {place}"
+        question = with_request_id(i, question)
+        rows.append({
+            "image_text": image_text,
+            "question": question,
+            "answer": answer,
+            "task": "text_image_recognition",
+        })
+    return rows
+
+
+def interruption_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        name = sample_from(NAMES, rng)
+        place = sample_from(PLACES, rng)
+        ref = 5_000 + i
+        rows.append(
+            row_json(
+                idx=i,
+                user=f"Actually, stop and answer the new question for note {ref}: where is {name} going?",
+                assistant=f"{name} is going to {place}.",
+                task="interrupt",
+                interrupt=True,
+            )
+        )
+    return rows
+
+
+def architecture_control_rows(rng: random.Random, start: int, count: int) -> list[dict]:
+    rows: list[dict] = []
+    for i in range(start, start + count):
+        phrase = sample_from(ARCHIVE_BIAS, rng)
+        if i % 2 == 0:
+            user = f"Explain the concept in one sentence for note {10000 + i}: define {phrase} using a daily-life analogy."
+            assistant = f"{phrase.title()} is best explained by breaking it into small repeated steps."
+            task = "concept_lite"
+        else:
+            user = f"Describe one practical operational hint for {phrase} in a household context."
+            assistant = f"Use one simple routine and avoid heavy tooling."
+            task = "concept_lite"
+        rows.append(row_json(idx=i, user=user, assistant=assistant, task=task))
+    return rows
+
+
+def dedupe_rows(rows: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    kept: list[dict] = []
+    for row in rows:
+        key = hashlib.sha1(
+            json.dumps(row, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(row)
+    return kept
+
+
+def add_ids(rows: list[dict], start_idx: int = 1) -> list[dict]:
+    out = []
+    for idx, row in enumerate(rows, start=start_idx):
+        if isinstance(row, dict):
+            row.setdefault("id", f"posttrain_{idx:05d}")
+            out.append(row)
+    return out
+
+
+def build_rows(count: int) -> list[dict]:
+    count = max(1, int(count))
+    rng = random.Random(SEED)
+    rows: list[dict] = []
+    total = count
+    allocations = {
+        "format": max(1, int(0.24 * total)),
+        "extract": max(1, int(0.16 * total)),
+        "memory": max(1, int(0.16 * total)),
+        "reason": max(1, int(0.16 * total)),
+        "image": max(1, int(0.12 * total)),
+        "text_image": max(1, int(0.10 * total)),
+        "interrupt": max(1, int(0.08 * total)),
+        "concept": 0,
+    }
+    used = sum(allocations.values())
+    allocations["concept"] = max(0, total - used)
+
+    idx = 0
+    rows.extend(text_format_rows(rng, idx, allocations["format"]))
+    idx += allocations["format"]
+    rows.extend(extraction_rows(rng, idx, allocations["extract"]))
+    idx += allocations["extract"]
+    rows.extend(control_and_memory_rows(rng, idx, allocations["memory"]))
+    idx += allocations["memory"]
+    rows.extend(arithmetic_and_classification_rows(rng, idx, allocations["reason"]))
+    idx += allocations["reason"]
+    rows.extend(image_rows(rng, idx, allocations["image"]))
+    idx += allocations["image"]
+    rows.extend(text_image_rows(rng, idx, allocations["text_image"]))
+    idx += allocations["text_image"]
+    rows.extend(interruption_rows(rng, idx, allocations["interrupt"]))
+    idx += allocations["interrupt"]
+    rows.extend(architecture_control_rows(rng, idx, allocations["concept"]))
+
+    deduped = dedupe_rows(rows)
+    # Keep ordering consistent for reproducibility after deduplication if collisions occur.
+    return add_ids(deduped[:count], start_idx=1)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build Propagator post-training JSONL data.")
+    parser = argparse.ArgumentParser(description="Build diverse post-train JSONL data.")
     parser.add_argument("--rows", type=int, default=10_000)
     parser.add_argument("--output", type=Path, default=Path("data/propagator_posttrain_10k.jsonl"))
     args = parser.parse_args()
+    output = args.output
+    output.parent.mkdir(parents=True, exist_ok=True)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    rows = build_rows(max(1, int(args.rows)))
-    with args.output.open("w", encoding="utf-8") as f:
+    rows = build_rows(int(args.rows))
+    with output.open("w", encoding="utf-8") as f:
         for item in rows:
             f.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
-    print(f"wrote {len(rows)} rows to {args.output}")
+    print(f"wrote {len(rows)} rows to {output}")
 
 
 if __name__ == "__main__":

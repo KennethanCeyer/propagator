@@ -1,0 +1,20 @@
+{"id":"img_front_person","image_text":"person standing near the front door, no package visible","question":"What is visible?","answer":"A person is standing near the front door.","task":"image_recognition"}
+{"id":"img_desk_mug","image_text":"red mug on a desk beside a closed notebook","question":"What object should be reported?","answer":"A red mug is on the desk.","task":"image_recognition"}
+{"id":"img_conveyor_box","image_text":"cardboard box on conveyor belt, label facing outward","question":"What item is on the conveyor?","answer":"A cardboard box is on the conveyor belt.","task":"image_recognition"}
+{"id":"img_empty_hallway","image_text":"empty hallway with lights on and no person in view","question":"Is anyone visible?","answer":"No person is visible.","task":"image_recognition"}
+{"id":"img_open_umbrella","image_text":"blue umbrella leaning beside a hallway bench","question":"What object is beside the bench?","answer":"A blue umbrella is beside the bench.","task":"image_recognition"}
+{"id":"img_book_table","image_text":"open book on a wooden table with a pencil nearby","question":"What is on the table?","answer":"An open book and a pencil are on the table.","task":"image_recognition"}
+{"id":"img_kitchen_pan","image_text":"frying pan on a stove with the handle turned left","question":"What cookware is visible?","answer":"A frying pan is visible on the stove.","task":"image_recognition"}
+{"id":"img_store_shelf","image_text":"store shelf with apples on the top row and oranges below","question":"Which fruit is on the top row?","answer":"Apples are on the top row.","task":"image_recognition"}
+{"id":"img_bus_stop","image_text":"two people waiting under a bus stop sign","question":"How many people are waiting?","answer":"Two people are waiting.","task":"image_recognition"}
+{"id":"img_bicycle","image_text":"black bicycle locked to a rack near a brick wall","question":"What vehicle is visible?","answer":"A black bicycle is visible.","task":"image_recognition"}
+{"id":"img_garden_tool","image_text":"small shovel lying next to a flower pot","question":"What tool is near the flower pot?","answer":"A small shovel is near the flower pot.","task":"image_recognition"}
+{"id":"img_receipt","image_text":"paper receipt on a counter with a visible total line","question":"What document is shown?","answer":"A receipt is shown on the counter.","task":"image_recognition"}
+{"id":"img_no_object","image_text":"plain tabletop with no tools, cups, or papers","question":"What objects are on the tabletop?","answer":"No objects are visible on the tabletop.","task":"image_recognition"}
+{"id":"img_door_open","image_text":"cabinet door open with shelves visible inside","question":"What is the cabinet state?","answer":"The cabinet door is open.","task":"image_recognition"}
+{"id":"img_door_closed","image_text":"cabinet door closed with the handle centered","question":"Is the cabinet open or closed?","answer":"The cabinet door is closed.","task":"image_recognition"}
+{"id":"img_package_left","image_text":"brown package placed on the left side of an entry mat","question":"Where is the package?","answer":"The package is on the left side of the entry mat.","task":"image_recognition"}
+{"id":"img_laundry","image_text":"green laundry basket filled with folded towels","question":"What is in the basket?","answer":"Folded towels are in the basket.","task":"image_recognition"}
+{"id":"img_painting","image_text":"framed landscape painting hanging above a sofa","question":"What is hanging above the sofa?","answer":"A framed landscape painting is hanging above the sofa.","task":"image_recognition"}
+{"id":"img_crosswalk","image_text":"pedestrian crossing sign near a quiet street","question":"What sign is visible?","answer":"A pedestrian crossing sign is visible.","task":"image_recognition"}
+{"id":"img_plate","image_text":"white plate with toast and sliced fruit","question":"What food is on the plate?","answer":"Toast and sliced fruit are on the plate.","task":"image_recognition"}

@@ -7,7 +7,37 @@
     "mode": "duplex_chat",
     "streaming": false,
     "repeat": 8,
-    "weight": 0.55
+    "weight": 0.35
+  },
+  {
+    "name": "json",
+    "data_files": "data/propagator_instruction_balanced_seed.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "duplex_chat",
+    "streaming": false,
+    "repeat": 80,
+    "weight": 0.12
+  },
+  {
+    "name": "json",
+    "data_files": "data/propagator_image_recognition_seed.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "image_recognition",
+    "streaming": false,
+    "repeat": 120,
+    "weight": 0.05
+  },
+  {
+    "name": "json",
+    "data_files": "data/propagator_text_image_seed.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "image_recognition",
+    "streaming": false,
+    "repeat": 120,
+    "weight": 0.10
   },
   {
     "name": "json",
@@ -16,8 +46,8 @@
     "validation_split": "train",
     "mode": "duplex_chat",
     "streaming": false,
-    "repeat": 40,
-    "weight": 0.15
+    "repeat": 12,
+    "weight": 0.04
   },
   {
     "name": "databricks/databricks-dolly-15k",
@@ -31,6 +61,6 @@
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",
-    "weight": 0.10
+    "weight": 0.24
   }
 ]

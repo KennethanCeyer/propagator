@@ -46,15 +46,6 @@ from pydantic_settings import BaseSettings
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from tqdm import tqdm
 
-# Fix deprecation warning in external encodec library by monkey-patching torch.nn.utils.weight_norm
-# before encodec is imported. The new API is torch.nn.utils.parametrizations.weight_norm.
-try:
-    import torch.nn.utils.parametrizations as parametrizations
-    import torch.nn.utils as utils
-    utils.weight_norm = parametrizations.weight_norm
-except ImportError:
-    pass
-
 # Fix Orbax 0.11.39 incompatibility with JAX 0.6.2+ where jax.sharding.set_mesh returns None
 # instead of a context manager. Orbax expects a context manager.
 import jax.sharding
@@ -311,14 +302,30 @@ SPECIAL_TOKENS = [
     "[MODEL_END]",
     "[SESSION_END]",
     "[USER_INTERRUPT]",
+    "[TEXT]",
+    "[TEXT_IN]",
+    "[TEXT_OUT]",
+    "[AUDIO]",
     "[AUDIO_IN]",
     "[AUDIO_OUT]",
     "[AUDIO_END]",
-    "[SILENCE]",
-    "[TEXT_IN]",
-    "[TEXT_OUT]",
+    "[IMAGE]",
+    "[IMAGE_IN]",
+    "[HYBRID]",
     "[HYBRID_OUT]",
+    "[SILENCE]",
 ]
+
+
+def _tokenize_modal_input_prefix(token: str) -> list[int]:
+    """Return standardized modal prefix tokens for user-side inputs."""
+    if token == "audio":
+        return [token_ids["audio"], token_ids["audio_in"]]
+    if token == "image":
+        return [token_ids["image"], token_ids["image_in"]]
+    if token == "hybrid":
+        return [token_ids["hybrid"], token_ids["audio"], token_ids["audio_in"]]
+    return []
 
 DEFAULT_DATASET_MIX = json.dumps(
     [
@@ -456,15 +463,18 @@ class PropagatorConfig(BaseSettings):
     early_stopping_patience: int = 12
     early_stopping_min_delta: float = 0.01
     sample_gen_len: int = 256
-    sample_chunks: str = '["Hello", "could you", "tell me", "what", "your name", "is?"]'
+    sample_chunks: str = '["Answer with exactly one lowercase word:", "is water wet?"]'
     eval_text_cases: str = json.dumps(
         [
             {"name": "identity_name", "chunks": ["What", "is your name?"]},
-            {"name": "instruction_summary", "chunks": ["Give me", "a three-item robot safety checklist."]},
+            {"name": "instruction_summary", "chunks": ["Give me", "a three-item checklist for preparing a guest room."]},
             {"name": "factual_qa", "chunks": ["What is the capital", "of France?"]},
             {"name": "reasoning", "chunks": ["A box has three red balls and two blue balls.", "How many balls are there?"]},
             {"name": "context_recall", "chunks": ["The code word is amber.", "Repeat only the code word."]},
             {"name": "format_following", "chunks": ["Answer with one word:", "is water wet?"]},
+            {"name": "json_action", "chunks": ["Return JSON only with keys status and action.", "The pump is hot and vibrating."]},
+            {"name": "extraction", "chunks": ["Extract device and location:", "Sensor A12 reports 71 C in bay 4."]},
+            {"name": "image_recognition", "chunks": ["A red mug is on a desk in the image.", "What object is visible?"]},
             {"name": "architecture", "chunks": ["In one sentence,", "how does Propagator store context?"]},
             {"name": "turn_policy_silence", "chunks": ["I am still speaking", "[SILENCE]", "[SILENCE]"]},
         ],
@@ -585,6 +595,12 @@ class PropagatorConfig(BaseSettings):
     silence_end_tokens: int = 4
     silence_token_loss_weight: float = 0.5
     synthesize_turn_silence: bool = False
+    image_input_resolution: int = 160
+    image_max_input_resolution: int = 192
+    image_patch_size: int = 16
+    image_patch_vocab_size: int = 1024
+    image_tokens_per_sample: int = 64
+    image_recognition_only: bool = True
 
     inference_candidate_vocab_size: int = 8192
     eval_use_candidate_head: bool = False
@@ -601,6 +617,7 @@ class PropagatorConfig(BaseSettings):
     gcs_async_backup: bool = True
     local_eval_keep: int = 8
     local_checkpoint_keep: int = 1
+    resume_checkpoint: bool = True
 
     enable_data_sharding: bool = True
     data_axis_name: str = "data"
@@ -621,6 +638,8 @@ vocab_size: int
 text_vocab_size: int
 audio_token_start: int
 audio_token_end: int
+image_token_start: int
+image_token_end: int
 token_ids: dict[str, int]
 tokenizer_fingerprint: str
 candidate_token_ids_host: np.ndarray
@@ -663,6 +682,7 @@ token_ids_silence: int
 token_ids_text_in: int
 token_ids_text_out: int
 token_ids_hybrid_out: int
+token_ids_image_in: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -730,6 +750,7 @@ def parse_args() -> argparse.Namespace:
             "mimi_codes_asr",
             "mimi_codes_tts",
             "mimi_codes_speech_text",
+            "image_recognition",
             "echox_s2s_dialogue",
             "speech_dialogue",
         ],
@@ -832,6 +853,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--silence-end-tokens", type=int)
     parser.add_argument("--silence-token-loss-weight", type=float)
     parser.add_argument("--no-synthesize-turn-silence", action="store_true")
+    parser.add_argument("--image-input-resolution", type=int)
+    parser.add_argument("--image-max-input-resolution", type=int)
+    parser.add_argument("--image-patch-size", type=int)
+    parser.add_argument("--image-patch-vocab-size", type=int)
+    parser.add_argument("--image-tokens-per-sample", type=int)
+    parser.add_argument("--no-image-recognition-only", action="store_true")
 
     parser.add_argument("--inference-candidate-vocab-size", type=int)
     parser.add_argument("--eval-use-candidate-head", action="store_true")
@@ -849,6 +876,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sync-backup-blocking", action="store_true")
     parser.add_argument("--local-eval-keep", type=int)
     parser.add_argument("--local-checkpoint-keep", type=int)
+    parser.add_argument("--no-checkpoint-resume", action="store_true")
     parser.add_argument("--enable-data-sharding", action="store_true")
     parser.add_argument("--no-data-sharding", action="store_true")
     parser.add_argument("--auto-batch-hbm-gb", type=float)
@@ -890,6 +918,8 @@ def build_config() -> PropagatorConfig:
         updates["enable_audio"] = False
     if raw_updates.get("no_synthesize_turn_silence"):
         updates["synthesize_turn_silence"] = False
+    if raw_updates.get("no_image_recognition_only"):
+        updates["image_recognition_only"] = False
     if raw_updates.get("no_remat_scan_step"):
         updates["remat_scan_step"] = False
     if raw_updates.get("no_swiglu"):
@@ -900,6 +930,8 @@ def build_config() -> PropagatorConfig:
         updates["eval_use_full_audio_head"] = True
     if raw_updates.get("sync_backup_blocking"):
         updates["gcs_async_backup"] = False
+    if raw_updates.get("no_checkpoint_resume"):
+        updates["resume_checkpoint"] = False
     if raw_updates.get("no_data_sharding"):
         updates["enable_data_sharding"] = False
     if raw_updates.get("no_save_augmented_tokenizer"):
@@ -922,11 +954,13 @@ def build_config() -> PropagatorConfig:
         "stateless_validation",
         "no_audio",
         "no_synthesize_turn_silence",
+        "no_image_recognition_only",
         "no_remat_scan_step",
         "no_swiglu",
         "eval_use_full_head",
         "eval_use_full_audio_head",
         "sync_backup_blocking",
+        "no_checkpoint_resume",
         "no_data_sharding",
         "no_save_augmented_tokenizer",
         "no_require_byte_level_bpe",
@@ -978,6 +1012,16 @@ def build_config() -> PropagatorConfig:
         raise ValueError("--moe-num-experts must be >= 1")
     if int(cfg.moe_top_k) < 1:
         raise ValueError("--moe-top-k must be >= 1")
+    if int(cfg.image_input_resolution) <= 0:
+        raise ValueError("--image-input-resolution must be positive")
+    if int(cfg.image_max_input_resolution) < int(cfg.image_input_resolution):
+        raise ValueError("--image-max-input-resolution must be >= --image-input-resolution")
+    if int(cfg.image_patch_size) <= 0:
+        raise ValueError("--image-patch-size must be positive")
+    if int(cfg.image_patch_vocab_size) <= 0:
+        raise ValueError("--image-patch-vocab-size must be positive")
+    if int(cfg.image_tokens_per_sample) <= 0:
+        raise ValueError("--image-tokens-per-sample must be positive")
     cfg = cfg.model_copy(update={"tokenize_start_method": str(cfg.tokenize_start_method).lower().strip() or "auto"})
     if str(cfg.tokenize_start_method) not in {"auto", "fork", "spawn", "forkserver"}:
         raise ValueError("--tokenize-start-method must be one of: auto, fork, spawn, forkserver")
@@ -1295,6 +1339,8 @@ def source_cache_prefix(spec: dict[str, Any], split_name: str, source_idx: int) 
             str(text_vocab_size),
             str(audio_token_start),
             str(audio_token_end),
+            str(image_token_start),
+            str(image_token_end),
             tokenizer_fingerprint,
             str(config.tokenizer_vocab_size),
             str(config.user_inner_loss_weight),
@@ -1638,34 +1684,105 @@ def row_texts_for_tokenizer(row: dict, mode: str, spec: dict[str, Any]) -> list[
         return []
 
 
+def fallback_tokenizer_row_text(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    output = row.get("output")
+    if isinstance(output, list):
+        parts: list[str] = []
+        for msg in output:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or msg.get("from") or "")
+            content = str(msg.get("content") or msg.get("value") or "")
+            if role == "user" and content:
+                parts.append(content)
+        return "\n".join(parts)
+    return str(row.get("question") or row.get("prompt") or row.get("image_text") or row.get("content") or "")
+
+
 def iter_tokenizer_training_texts():
+    def _is_local_data_source_spec(spec: dict[str, Any]) -> bool:
+        data_files = spec.get("data_files")
+        if not data_files:
+            return False
+        if isinstance(data_files, (list, tuple)):
+            return all(isinstance(path, str) and "://" not in path for path in data_files)
+        return isinstance(data_files, str) and "://" not in data_files
+
     produced = 0
     rows = 0
     specs = parse_dataset_mix()
     row_limit = int(config.tokenizer_train_rows)
     uncapped = row_limit <= 0
+    tokenizer_specs = specs
+    if uncapped:
+        local_specs = [spec for spec in specs if _is_local_data_source_spec(spec)]
+        if local_specs:
+            tokenizer_specs = local_specs
     per_spec_rows = None if uncapped else max(1, math.ceil(row_limit / len(specs)))
 
-    for spec in specs:
+    def log_spec_skip(name: str, split: str, exc: Exception) -> None:
+        log_info(f"[Tokenizer] Skipping tokenizer source {name}:{split}: {exc}")
+
+    for spec in tokenizer_specs:
         split = split_for_dataset_spec(spec, "train")
         try:
             ds = load_dataset_from_spec(spec, split)
         except Exception as exc:
-            log_info(f"Tokenizer dataset skipped: {spec['name']} split={split}: {exc}")
+            log_spec_skip(spec.get("name", "<unknown>"), split, exc)
             continue
 
-        for row in progress_bar(ds, desc=f"Training tokenizer:{spec['name']}", total=per_spec_rows):
-            if not uncapped and rows >= row_limit:
-                break
-            rows += 1
+        try:
+            dataset_iter = safe_dataset_iter(ds, repeat_count=1, skip_rows=0, skip_log_label=f"Tokenizer:{spec.get('name')}")
+            total = per_spec_rows if per_spec_rows is not None else None
+            for row in progress_bar(dataset_iter, desc=f"Training tokenizer:{spec['name']}", total=total):
+                if not uncapped and rows >= row_limit:
+                    break
+                rows += 1
 
-            texts = row_texts_for_tokenizer(row, str(spec.get("mode", config.dataset_mode)), spec)
-            for text in texts:
-                if text:
-                    produced += 1
-                    yield text
-            if per_spec_rows is not None and rows % per_spec_rows == 0:
-                break
+                try:
+                    texts = row_texts_for_tokenizer(row, str(spec.get("mode", config.dataset_mode)), spec)
+                except Exception as exc:
+                    log_info(f"[Tokenizer] Skipping malformed row from {spec.get('name')} split={split}: {exc}")
+                    continue
+
+                for text in texts:
+                    if text:
+                        produced += 1
+                        yield text
+
+                if per_spec_rows is not None and rows % per_spec_rows == 0:
+                    break
+        except Exception as exc:
+            log_spec_skip(spec.get("name", "<unknown>"), split, exc)
+
+    if produced == 0:
+        fallback_files = [
+            Path("data/propagator_instruction_balanced_seed.jsonl"),
+            Path("data/propagator_image_recognition_seed.jsonl"),
+            Path("data/propagator_identity.jsonl"),
+            Path("data/propagator_posttrain_10k.jsonl"),
+        ]
+        for path in fallback_files:
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        row = json.loads(line)
+                        user_text = fallback_tokenizer_row_text(row)
+                        if user_text:
+                            produced += 1
+                            yield user_text
+                if produced > 0:
+                    log_info(f"[Tokenizer] Fallback text seed loaded from {path}")
+                    return
+            except Exception as exc:
+                log_info(f"[Tokenizer] Failed fallback load from {path}: {exc}")
 
     if produced == 0:
         raise RuntimeError("No text was yielded for tokenizer training")
@@ -1815,26 +1932,6 @@ def get_audio_codec() -> dict[str, Any] | None:
     if _audio_codec_error is not None:
         return None
 
-    def _audio_codec_error_message(exc: Exception) -> str:
-        return f"{type(exc).__name__}: {exc}"
-
-    def _load_encodec_codec() -> dict[str, Any]:
-        import torch
-        from encodec import EncodecModel
-        from encodec.utils import convert_audio
-
-        # Restrict PyTorch to a single thread to avoid contention across preprocessing workers.
-        torch.set_num_threads(1)
-        try:
-            torch.set_num_interop_threads(1)
-        except RuntimeError:
-            pass
-
-        model = EncodecModel.encodec_model_24khz()
-        model.set_target_bandwidth(6.0)
-        model.eval()
-        return {"backend": "encodec", "torch": torch, "model": model, "convert_audio": convert_audio}
-
     if config.audio_backend == "mimi":
         try:
             import rustymimi
@@ -1857,35 +1954,28 @@ def get_audio_codec() -> dict[str, Any] | None:
             _audio_codec_error = None
             return _audio_codec
         except Exception as exc:
-            _audio_codec_error = _audio_codec_error_message(exc)
+            _audio_codec_error = f"{type(exc).__name__}: {exc}"
             log_info(
-                f"[Audio] Mimi backend unavailable for requested --audio-backend=mimi; attempting Encodec fallback. "
+                "[Audio] Mimi backend unavailable for requested --audio-backend=mimi; "
+                "continuing without codec-based audio preprocessing. "
                 f"Error: {_audio_codec_error}"
             )
-            try:
-                _audio_codec = _load_encodec_codec()
-                _audio_codec_error = None
-                log_info("[Audio] Falling back to Encodec backend for this run.")
-                return _audio_codec
-            except Exception as fallback_exc:
-                _audio_codec_error = _audio_codec_error_message(fallback_exc)
-                log_info(
-                    "[Audio] Encodec fallback unavailable; audio will be disabled for this run. "
-                    f"Error: {_audio_codec_error}"
-                )
-                return None
+            return None
 
-    if config.audio_backend != "encodec":
+    if config.audio_backend == "encodec":
+        _audio_codec_error = "encodec backend is disabled in this TPU/JAX-focused preprocessing path"
+        log_info(
+            "[Audio] Encodec backend is intentionally disabled to avoid torch dependency. "
+            "Use --audio-backend=mimi for preprocessing."
+        )
         return None
 
-    try:
-        _audio_codec = _load_encodec_codec()
-        _audio_codec_error = None
-        return _audio_codec
-    except Exception as exc:
-        _audio_codec_error = _audio_codec_error_message(exc)
-        log_info(f"[Audio] Encodec backend unavailable. Audio will be disabled for this run. Error: {_audio_codec_error}")
+    if config.audio_backend != "none":
+        _audio_codec_error = f"unsupported audio backend: {config.audio_backend}"
+        log_info(f"[Audio] Unknown audio backend requested. Audio will be disabled. Error: {_audio_codec_error}")
         return None
+
+    return None
 
 
 def audio_codes_to_token_frames(codes_np: np.ndarray) -> list[list[int]]:
@@ -1919,6 +2009,32 @@ def normalize_audio_array_for_codec(audio: tuple[np.ndarray, int]) -> tuple[np.n
     return array, int(sr)
 
 
+def _resample_audio_linear(array: np.ndarray, source_sr: int, target_sr: int) -> np.ndarray:
+    """Resample mono audio with simple linear interpolation (CPU-only).
+
+    This keeps preprocessing away from torch/torchaudio dependencies.
+    """
+    if int(source_sr) <= 0 or int(target_sr) <= 0 or array.size == 0:
+        return np.asarray(array, dtype=np.float32)
+    if int(source_sr) == int(target_sr):
+        return np.asarray(array, dtype=np.float32)
+
+    source_len = int(array.shape[-1])
+    target_len = max(1, int(round(source_len * float(target_sr) / float(source_sr))))
+    if target_len == source_len:
+        return np.asarray(array, dtype=np.float32)
+
+    x_source = np.linspace(0.0, 1.0, source_len, endpoint=False, dtype=np.float64)
+    x_target = np.linspace(0.0, 1.0, target_len, endpoint=False, dtype=np.float64)
+    lower = np.floor(x_target * source_len).astype(np.int64)
+    lower = np.clip(lower, 0, source_len - 1)
+    upper = np.minimum(lower + 1, source_len - 1)
+    alpha = x_target * source_len - lower.astype(np.float64)
+    alpha = alpha.reshape(1, -1)
+    out = (1.0 - alpha) * array[:, lower] + alpha * array[:, upper]
+    return np.ascontiguousarray(out.astype(np.float32))
+
+
 def encode_audio_batch_to_token_ids(audios: list[tuple[np.ndarray, int] | None]) -> list[list[list[int]]]:
     codec = get_audio_codec()
     if codec is None:
@@ -1931,57 +2047,29 @@ def encode_audio_batch_to_token_ids(audios: list[tuple[np.ndarray, int] | None])
 
     model = codec["model"]
 
-    if codec["backend"] == "mimi":
-        import torch
-        import torchaudio.functional as audio_functional
+    if codec["backend"] != "mimi":
+        return [[] for _ in audios]
 
-        wavs_np: list[np.ndarray] = []
-        wav_lengths: list[int] = []
-        for idx in valid_indices:
-            array, sr = normalized[idx]
-            wav = torch.from_numpy(array)
-            if wav.shape[0] > 1:
-                wav = wav.mean(dim=0, keepdim=True)
-            if int(sr) != int(config.audio_sample_rate):
-                wav = audio_functional.resample(wav, int(sr), int(config.audio_sample_rate))
-            wav_np = np.ascontiguousarray(wav.numpy(), dtype=np.float32)
-            wavs_np.append(wav_np)
-            wav_lengths.append(int(wav_np.shape[-1]))
+    model = codec["model"]
+    wavs_np: list[np.ndarray] = []
+    wav_lengths: list[int] = []
+    for idx in valid_indices:
+        array, sr = normalized[idx]
+        if array.shape[0] > 1:
+            array = array.mean(axis=0, keepdims=True)
+        wav_np = _resample_audio_linear(array, int(sr), int(config.audio_sample_rate))
+        if wav_np.size == 0:
+            wav_np = np.zeros((1, 1), dtype=np.float32)
+        wavs_np.append(np.ascontiguousarray(wav_np, dtype=np.float32))
+        wav_lengths.append(int(wav_np.shape[-1]))
 
-        max_len = max(wav_lengths)
-        batch_np = np.zeros((len(wavs_np), 1, max_len), dtype=np.float32)
-        for local_idx, wav_np in enumerate(wavs_np):
-            batch_np[local_idx, :, : wav_np.shape[-1]] = wav_np
+    max_len = max(wav_lengths)
+    batch_np = np.zeros((len(wavs_np), 1, max_len), dtype=np.float32)
+    for local_idx, wav_np in enumerate(wavs_np):
+        batch_np[local_idx, :, : wav_np.shape[-1]] = wav_np
 
-        model.reset()
-        codes_np = np.asarray(model.encode(batch_np), dtype=np.int32)
-    else:
-        torch = codec["torch"]
-        convert_audio = codec["convert_audio"]
-
-        wavs = []
-        wav_lengths = []
-        for idx in valid_indices:
-            array, sr = normalized[idx]
-            wav = torch.from_numpy(array)
-            wav = convert_audio(wav, sr, config.audio_sample_rate, 1)
-            wavs.append(wav)
-            wav_lengths.append(int(wav.shape[-1]))
-
-        max_len = max(int(wav.shape[-1]) for wav in wavs)
-        padded = []
-        for wav in wavs:
-            if int(wav.shape[-1]) < max_len:
-                wav = torch.nn.functional.pad(wav, (0, max_len - int(wav.shape[-1])))
-            padded.append(wav)
-
-        with torch.no_grad():
-            batch = torch.stack(padded, dim=0)
-            encoded_frames = model.encode(batch)
-            if not encoded_frames:
-                return [[] for _ in audios]
-            codes = torch.cat([frame_codes for frame_codes, _ in encoded_frames], dim=-1)
-            codes_np = codes.detach().cpu().numpy().astype(np.int32)
+    model.reset()
+    codes_np = np.asarray(model.encode(batch_np), dtype=np.int32)
 
     results: list[list[list[int]]] = [[] for _ in audios]
     total_frames = int(codes_np.shape[-1])
@@ -2005,6 +2093,9 @@ def encode_audio_to_token_ids(row: dict, spec: dict[str, Any] | None = None) -> 
 def decode_audio_token_ids_to_waveform(token_ids_: list[int]) -> tuple[np.ndarray, int, str | None]:
     codec = get_audio_codec()
     if codec is None:
+        return np.zeros((config.audio_sample_rate,), dtype=np.float32), config.audio_sample_rate, _audio_codec_error
+
+    if codec["backend"] != "mimi":
         return np.zeros((config.audio_sample_rate,), dtype=np.float32), config.audio_sample_rate, _audio_codec_error
 
     n_q = int(config.audio_codebooks)
@@ -2034,17 +2125,9 @@ def decode_audio_token_ids_to_waveform(token_ids_: list[int]) -> tuple[np.ndarra
         return np.zeros((config.audio_sample_rate,), dtype=np.float32), config.audio_sample_rate, "no_audio_tokens"
 
     model = codec["model"]
-    if codec["backend"] == "mimi":
-        codes_np = np.ascontiguousarray(np.asarray(frames, dtype=np.uint32).T[None, :, :])
-        model.reset()
-        array = np.asarray(model.decode(codes_np), dtype=np.float32).squeeze(0).squeeze(0)
-    else:
-        torch = codec["torch"]
-        codes_np = np.asarray(frames, dtype=np.int64).T[None, :, :]
-        with torch.no_grad():
-            codes = torch.from_numpy(codes_np)
-            wav = model.decode([(codes, None)])[0].squeeze(0).squeeze(0)
-        array = wav.detach().cpu().numpy().astype(np.float32)
+    codes_np = np.ascontiguousarray(np.asarray(frames, dtype=np.uint32).T[None, :, :])
+    model.reset()
+    array = np.asarray(model.decode(codes_np), dtype=np.float32).squeeze(0).squeeze(0)
     return np.clip(array, -1.0, 1.0), config.audio_sample_rate, None
 
 
@@ -2098,12 +2181,17 @@ def control_token_ids() -> set[int]:
         token_ids["model_end"],
         token_ids["session_end"],
         token_ids["user_interrupt"],
+        token_ids.get("text", -1),
         token_ids["audio_in"],
+        token_ids.get("audio", -1),
+        token_ids.get("image_in", -1),
+        token_ids.get("image", -1),
         token_ids["audio_out"],
         token_ids["audio_end"],
         token_ids["silence"],
         token_ids["text_in"],
         token_ids["text_out"],
+        token_ids.get("hybrid", -1),
         token_ids.get("hybrid_out", -1),
         token_ids["pad"],
         token_ids["unk"],
@@ -2120,15 +2208,19 @@ def decision_token_ids() -> set[int]:
 
 def new_target_stats() -> dict[str, int]:
     return {
+        "text_in": 0,
+        "text_out": 0,
+        "audio_in": 0,
+        "audio": 0,
+        "audio_out": 0,
+        "audio_end": 0,
+        "image_in": 0,
+        "image": 0,
+        "hybrid_out": 0,
         "listen": 0,
         "user_end": 0,
         "model_end": 0,
         "interrupt": 0,
-        "audio": 0,
-        "audio_out": 0,
-        "audio_end": 0,
-        "text_out": 0,
-        "hybrid_out": 0,
         "content": 0,
         "control": 0,
         "ignored": 0,
@@ -2248,6 +2340,18 @@ def add_target_stats(stats: dict[str, int], target_id: int, weight: float) -> No
         stats["content"] += 1
 
 
+def add_input_stats(stats: dict[str, int], input_id: int) -> None:
+    ensure_target_stats(stats)
+    if input_id == token_ids.get("text_in", -1):
+        stats["text_in"] += 1
+    elif input_id == token_ids.get("audio_in", -1):
+        stats["audio_in"] += 1
+    elif input_id == token_ids.get("image_in", -1):
+        stats["image_in"] += 1
+    elif is_image_token_id(input_id):
+        stats["image"] += 1
+
+
 def remove_target_stats(stats: dict[str, int], target_id: int, weight: float) -> None:
     ensure_target_stats(stats)
     if weight <= 0.0 or target_id == token_ids["pad"]:
@@ -2306,6 +2410,7 @@ def tokenize_duplex(
     def add(input_id, target_id, weight_override: float | None = None) -> int:
         in_frame = input_id if isinstance(input_id, list) else [int(input_id)] + [token_ids["pad"]] * 7
         tr_frame = target_id if isinstance(target_id, list) else [int(target_id)] + [token_ids["pad"]] * 7
+        add_input_stats(stats, int(in_frame[0]))
         target_main = tr_frame[0]
         w = default_loss_weight_for_target(target_main) if weight_override is None else float(weight_override)
         in_ids.append(in_frame)
@@ -2563,6 +2668,7 @@ def tokenize_modal_exchange(
     def add(input_id, target_id, weight_override: float | None = None) -> int:
         in_frame = input_id if isinstance(input_id, list) else [int(input_id)] + [token_ids["pad"]] * 7
         tr_frame = target_id if isinstance(target_id, list) else [int(target_id)] + [token_ids["pad"]] * 7
+        add_input_stats(stats, int(in_frame[0]))
         target_main = tr_frame[0]
         w = default_loss_weight_for_target(target_main) if weight_override is None else float(weight_override)
         in_ids.append(in_frame)
@@ -2632,21 +2738,21 @@ def tokenize_audio_asr(row: dict, spec: dict[str, Any] | None = None) -> tuple[l
     task = choose_audio_task(row, transcript, spec)
     if task == "tts":
         prompt = format_tts_prompt(transcript)
-        user_ids = encode_text(prompt)
+        user_ids = [*_tokenize_modal_input_prefix("audio"), *encode_text(prompt)]
         model_ids = audio_output_ids(audio_ids)
         return tokenize_modal_exchange(user_ids, model_ids)
 
     if task in {"audio", "audio_audio", "speech"}:
-        user_ids = [token_ids["audio_in"], *audio_ids]
+        user_ids = [*_tokenize_modal_input_prefix("audio"), *audio_ids]
         model_ids = audio_output_ids(audio_ids)
         return tokenize_modal_exchange(user_ids, model_ids, user_inner_weight=config.listen_loss_weight)
 
     if task in {"hybrid", "duplex"}:
-        user_ids = [token_ids["audio_in"], *audio_ids]
+        user_ids = [*_tokenize_modal_input_prefix("hybrid"), *audio_ids]
         model_ids = hybrid_output_ids(encode_text(f"I heard: {transcript}"), audio_ids)
         return tokenize_modal_exchange(user_ids, model_ids, user_inner_weight=config.listen_loss_weight)
 
-    user_ids = [token_ids["audio_in"], *audio_ids]
+    user_ids = [*_tokenize_modal_input_prefix("audio"), *audio_ids]
     return tokenize_modal_exchange(user_ids, text_output_ids(text_ids), user_inner_weight=config.listen_loss_weight)
 
 
@@ -2703,19 +2809,189 @@ def tokenize_mimi_codes_speech_text(row: dict, spec: dict[str, Any] | None = Non
 
     if task == "tts":
         prompt = format_tts_prompt(transcript)
-        return tokenize_modal_exchange(encode_text(prompt), audio_output_ids(audio_ids))
+        return tokenize_modal_exchange(_tokenize_modal_input_prefix("audio") + encode_text(prompt), audio_output_ids(audio_ids))
 
     if task in {"audio", "audio_audio", "speech"}:
-        user_ids = [token_ids["audio_in"], *audio_ids]
+        user_ids = [*_tokenize_modal_input_prefix("audio"), *audio_ids]
         return tokenize_modal_exchange(user_ids, audio_output_ids(audio_ids), user_inner_weight=config.listen_loss_weight)
 
     if task in {"hybrid", "duplex"}:
-        user_ids = [token_ids["audio_in"], *audio_ids]
+        user_ids = [*_tokenize_modal_input_prefix("hybrid"), *audio_ids]
         model_ids = hybrid_output_ids(encode_text(f"I heard: {transcript}"), audio_ids)
         return tokenize_modal_exchange(user_ids, model_ids, user_inner_weight=config.listen_loss_weight)
 
-    user_ids = [token_ids["audio_in"], *audio_ids]
+    user_ids = [*_tokenize_modal_input_prefix("audio"), *audio_ids]
     return tokenize_modal_exchange(user_ids, text_output_ids(text_ids), user_inner_weight=config.listen_loss_weight)
+
+
+def first_nonempty_string(row: dict, keys: list[str]) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(item) for item in value if str(item).strip())
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def image_text_to_patch_token_ids(text: str) -> list[int]:
+    normalized = " ".join(str(text).lower().split())
+    words = re.findall(r"[\w']+", normalized) or ["image"]
+    tokens: list[int] = []
+    for idx in range(int(config.image_tokens_per_sample)):
+        word = words[idx % len(words)]
+        digest = hashlib.blake2b(f"{idx}:{word}:{normalized}".encode("utf-8"), digest_size=8).digest()
+        code = int.from_bytes(digest, "little") % int(config.image_patch_vocab_size)
+        tokens.append(image_token_id(code))
+    return tokens
+
+
+def _extract_image_value(row: dict, spec: dict[str, Any] | None = None) -> Any | None:
+    keys = []
+    if spec and spec.get("image_key"):
+        keys.append(str(spec["image_key"]))
+    keys.extend(["image", "frame", "camera_image", "camera_frame", "pixels"])
+    for key in keys:
+        if key in row and row[key] is not None:
+            return row[key]
+    return None
+
+
+def _image_value_to_array(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, np.ndarray):
+        return value
+    if isinstance(value, dict):
+        if "array" in value:
+            return np.asarray(value["array"])
+        if "bytes" in value and value["bytes"]:
+            try:
+                from PIL import Image
+
+                image = Image.open(io.BytesIO(value["bytes"])).convert("RGB")
+                return np.asarray(image)
+            except Exception:
+                return None
+        if "path" in value and value["path"]:
+            value = value["path"]
+    if isinstance(value, (str, Path)):
+        path = Path(value)
+        if not path.exists():
+            return None
+        try:
+            from PIL import Image
+
+            image = Image.open(path).convert("RGB")
+            return np.asarray(image)
+        except Exception:
+            return None
+    if hasattr(value, "convert"):
+        try:
+            image = value.convert("RGB")
+            return np.asarray(image)
+        except Exception:
+            return None
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return None
+    if array.size == 0:
+        return None
+    return array
+
+
+def image_array_to_patch_token_ids(array: np.ndarray) -> list[int]:
+    array = np.asarray(array)
+    if array.ndim == 2:
+        array = np.repeat(array[:, :, None], 3, axis=2)
+    if array.ndim != 3 or array.shape[2] < 3:
+        raise DataQualityError("Image row has unsupported pixel array shape")
+    array = array[:, :, :3]
+    if array.dtype != np.uint8:
+        array_f = np.asarray(array, dtype=np.float32)
+        if array_f.size and float(np.nanmax(array_f)) <= 1.0:
+            array_f = array_f * 255.0
+        array = np.clip(array_f, 0.0, 255.0).astype(np.uint8)
+
+    resolution = int(config.image_input_resolution)
+    patch = int(config.image_patch_size)
+    patch = max(1, min(patch, resolution))
+    try:
+        from PIL import Image
+
+        image = Image.fromarray(array, mode="RGB").resize((resolution, resolution), Image.Resampling.BILINEAR)
+        resized = np.asarray(image, dtype=np.uint8)
+    except Exception:
+        y_idx = np.linspace(0, array.shape[0] - 1, resolution).astype(np.int32)
+        x_idx = np.linspace(0, array.shape[1] - 1, resolution).astype(np.int32)
+        resized = array[y_idx][:, x_idx]
+
+    tokens: list[int] = []
+    for y in range(0, resolution, patch):
+        for x in range(0, resolution, patch):
+            block = resized[y : y + patch, x : x + patch]
+            if block.size == 0:
+                continue
+            mean_rgb = block.reshape(-1, 3).mean(axis=0)
+            r = int(mean_rgb[0] // 32) & 0x7
+            g = int(mean_rgb[1] // 32) & 0x7
+            b = int(mean_rgb[2] // 16) & 0xF
+            tokens.append(image_token_id((r << 7) | (g << 4) | b))
+            if len(tokens) >= int(config.image_tokens_per_sample):
+                return tokens
+
+    if not tokens:
+        raise DataQualityError("Image row produced no patch tokens")
+    while len(tokens) < int(config.image_tokens_per_sample):
+        tokens.append(tokens[len(tokens) % len(tokens)])
+    return tokens[: int(config.image_tokens_per_sample)]
+
+
+def image_patch_token_ids(row: dict, image_text: str, spec: dict[str, Any] | None = None) -> list[int]:
+    array = _image_value_to_array(_extract_image_value(row, spec))
+    if array is not None:
+        return image_array_to_patch_token_ids(array)
+    return image_text_to_patch_token_ids(image_text)
+
+
+def tokenize_image_recognition(row: dict, spec: dict[str, Any] | None = None) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
+    if config.image_recognition_only is False:
+        raise RuntimeError("Only recognition-only image supervision is implemented")
+
+    image_key = str((spec or {}).get("image_text_key", "")).strip()
+    question_key = str((spec or {}).get("question_key", "")).strip()
+    answer_key = str((spec or {}).get("answer_key", "")).strip()
+    image_text_keys = [image_key] if image_key else []
+    image_text_keys.extend(["image_text", "caption", "description", "scene", "objects", "text"])
+    question_keys = [question_key] if question_key else []
+    question_keys.extend(["question", "prompt", "query"])
+    answer_keys = [answer_key] if answer_key else []
+    answer_keys.extend(["answer", "response", "label", "caption"])
+
+    image_text = first_nonempty_string(row, image_text_keys)
+    question = first_nonempty_string(row, question_keys) or "Describe the image."
+    answer = first_nonempty_string(row, answer_keys)
+    if not image_text:
+        raise DataQualityError("Image recognition row has no image description or metadata text")
+    if not answer:
+        raise DataQualityError("Image recognition row has no answer")
+
+    image_ids = image_patch_token_ids(row, image_text, spec)
+    user_ids = [
+        *_tokenize_modal_input_prefix("image"),
+        *image_ids,
+        token_ids["text_in"],
+        *encode_text(question),
+    ]
+    return tokenize_modal_exchange(
+        user_ids,
+        text_output_ids(encode_text(answer)),
+        user_inner_weight=config.listen_loss_weight,
+    )
 
 
 def tokenize_echox_s2s_dialogue(row: dict, spec: dict[str, Any] | None = None) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
@@ -2762,7 +3038,7 @@ def tokenize_echox_s2s_dialogue(row: dict, spec: dict[str, Any] | None = None) -
                 continue
             model_ids = hybrid_output_ids(encode_text(assistant_text), assistant_audio)
 
-        user_ids = [token_ids["audio_in"], *user_audio]
+        user_ids = [*_tokenize_modal_input_prefix("audio"), *user_audio]
         in_ids, tr_ids, row_weights, stats = tokenize_modal_exchange(
             user_ids,
             model_ids,
@@ -2797,6 +3073,8 @@ def tokenize_row_by_mode(
         return tokenize_audio_asr(row, spec)
     if mode in {"mimi_codes_asr", "mimi_codes_tts", "mimi_codes_speech_text"}:
         return tokenize_mimi_codes_speech_text(row, spec)
+    if mode == "image_recognition":
+        return tokenize_image_recognition(row, spec)
     if mode in {"echox_s2s_dialogue", "speech_dialogue"}:
         return tokenize_echox_s2s_dialogue(row, spec)
     raise ValueError(f"Unsupported dataset mode: {mode}")
@@ -2808,13 +3086,14 @@ def _worker_tokenize_row(args):
     row, mode, spec, stream_id, unroll_len = args
 
     # Ensure globals are initialized in case of spawn/forkserver context
-    global config, tokenizer, token_ids, text_vocab_size, vocab_size, audio_token_start, audio_token_end
+    global config, tokenizer, token_ids, text_vocab_size, vocab_size
+    global audio_token_start, audio_token_end, image_token_start, image_token_end
     if config is None:
         config = build_config()
         tokenizer = Tokenizer.from_file(config.tokenizer_path)
         token_ids = ensure_special_tokens(tokenizer)
         text_vocab_size = tokenizer.get_vocab_size()
-        vocab_size, audio_token_start, audio_token_end = compute_vocab_sizes(text_vocab_size)
+        vocab_size, audio_token_start, audio_token_end, image_token_start, image_token_end = compute_vocab_sizes(text_vocab_size)
         init_global_token_ids()
 
     try:
@@ -2836,13 +3115,14 @@ def _worker_tokenize_row_batch(args):
     rows, mode, spec, stream_id_start, unroll_len = args
 
     # Ensure globals are initialized in case of spawn/forkserver context
-    global config, tokenizer, token_ids, text_vocab_size, vocab_size, audio_token_start, audio_token_end
+    global config, tokenizer, token_ids, text_vocab_size, vocab_size
+    global audio_token_start, audio_token_end, image_token_start, image_token_end
     if config is None:
         config = build_config()
         tokenizer = Tokenizer.from_file(config.tokenizer_path)
         token_ids = ensure_special_tokens(tokenizer)
         text_vocab_size = tokenizer.get_vocab_size()
-        vocab_size, audio_token_start, audio_token_end = compute_vocab_sizes(text_vocab_size)
+        vocab_size, audio_token_start, audio_token_end, image_token_start, image_token_end = compute_vocab_sizes(text_vocab_size)
         init_global_token_ids()
 
     row_count = 0
@@ -3174,13 +3454,14 @@ def _worker_tokenize_echox_shard(args):
         shard_index, shard_url, split_name, split, spec, shard_dir_name, stream_offset, unroll_len = args
         progress_queue = None
 
-    global config, tokenizer, token_ids, text_vocab_size, vocab_size, audio_token_start, audio_token_end
+    global config, tokenizer, token_ids, text_vocab_size, vocab_size
+    global audio_token_start, audio_token_end, image_token_start, image_token_end
     if config is None:
         config = build_config()
         tokenizer = Tokenizer.from_file(config.tokenizer_path)
         token_ids = ensure_special_tokens(tokenizer)
         text_vocab_size = tokenizer.get_vocab_size()
-        vocab_size, audio_token_start, audio_token_end = compute_vocab_sizes(text_vocab_size)
+        vocab_size, audio_token_start, audio_token_end, image_token_start, image_token_end = compute_vocab_sizes(text_vocab_size)
         init_global_token_ids()
 
     shard_index = int(shard_index)
@@ -3453,6 +3734,8 @@ def cache_prefix(split_name: str, max_chunks: int, split_spec: str, skip_rows: i
             str(text_vocab_size),
             str(audio_token_start),
             str(audio_token_end),
+            str(image_token_start),
+            str(image_token_end),
             tokenizer_fingerprint,
             str(config.tokenizer_vocab_size),
             str(max_chunks),
@@ -3506,7 +3789,9 @@ def chunk_tokenized_stream(
 
         stats = new_target_stats()
         supervised = 0
-        for target_id, weight in zip(chunk_tr, chunk_w, strict=True):
+        for input_id, target_id, weight in zip(chunk_in, chunk_tr, chunk_w, strict=True):
+            main_input = input_id[0] if isinstance(input_id, list) else input_id
+            add_input_stats(stats, int(main_input))
             main_target = target_id[0] if isinstance(target_id, list) else target_id
             if weight > 0.0 and main_target != token_ids["pad"]:
                 supervised += 1
@@ -4291,6 +4576,8 @@ def tokenize_echox_dataset_sharded(
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
         "audio_token_end": audio_token_end,
+        "image_token_start": image_token_start,
+        "image_token_end": image_token_end,
         "shards": len(manifests),
     }
     if cache_storage == "disk":
@@ -4395,6 +4682,8 @@ def tokenize_dataset_rows(
             "text_vocab_size": text_vocab_size,
             "audio_token_start": audio_token_start,
             "audio_token_end": audio_token_end,
+            "image_token_start": image_token_start,
+            "image_token_end": image_token_end,
         }
         with open(str(cache_path) + ".meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -4647,21 +4936,7 @@ def tokenize_dataset_rows(
                     stream_ids[actual_count] = stream_id
                     chunk_positions[actual_count] = chunk_pos
 
-                    for key in (
-                        "listen",
-                        "user_end",
-                        "model_end",
-                        "interrupt",
-                        "audio",
-                        "audio_out",
-                        "audio_end",
-                        "text_out",
-                        "hybrid_out",
-                        "content",
-                        "control",
-                        "ignored",
-                    ):
-                        aggregate_stats[key] += int(chunk_stats[key])
+                    _merge_stats(aggregate_stats, chunk_stats)
 
                     actual_count += 1
                     added_chunks += 1
@@ -4703,6 +4978,8 @@ def tokenize_dataset_rows(
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
         "audio_token_end": audio_token_end,
+        "image_token_start": image_token_start,
+        "image_token_end": image_token_end,
     }
     if cache_storage == "disk":
         del input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
@@ -4978,6 +5255,8 @@ def tokenize_mixed_dataset_rows(
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
         "audio_token_end": audio_token_end,
+        "image_token_start": image_token_start,
+        "image_token_end": image_token_end,
     }
     if final_storage == "disk":
         with open(str(cache_path) + ".meta.json", "w", encoding="utf-8") as f:
@@ -4999,12 +5278,13 @@ def tokenize_mixed_dataset_rows(
 
 
 def load_tokenizer_and_datasets() -> tuple[np.ndarray, ...]:
-    global tokenizer, vocab_size, text_vocab_size, audio_token_start, audio_token_end, token_ids, tokenizer_fingerprint
+    global tokenizer, vocab_size, text_vocab_size, token_ids, tokenizer_fingerprint
+    global audio_token_start, audio_token_end, image_token_start, image_token_end
 
     tokenizer = load_or_train_tokenizer()
     token_ids = ensure_special_tokens(tokenizer)
     text_vocab_size = tokenizer.get_vocab_size()
-    vocab_size, audio_token_start, audio_token_end = compute_vocab_sizes(text_vocab_size)
+    vocab_size, audio_token_start, audio_token_end, image_token_start, image_token_end = compute_vocab_sizes(text_vocab_size)
     tokenizer_fingerprint = tokenizer_file_fingerprint(Path(config.tokenizer_path))
     log_info(f"Tokenizer fingerprint: {tokenizer_fingerprint}")
     save_tokenizer_snapshot()
@@ -5089,12 +5369,14 @@ def apply_grouped_rope(keys: jax.Array, positions: jax.Array, base: float, posit
     return jnp.concatenate([rotated, x_tail], axis=-1).astype(keys.dtype)
 
 
-def compute_vocab_sizes(text_size: int) -> tuple[int, int, int]:
-    if not config.enable_audio:
-        return text_size, text_size, text_size
-    start = int(text_size)
-    end = start + int(config.audio_codebooks) * int(config.audio_codebook_size)
-    return end, start, end
+def compute_vocab_sizes(text_size: int) -> tuple[int, int, int, int, int]:
+    audio_start = int(text_size)
+    audio_end = audio_start
+    if config.enable_audio:
+        audio_end = audio_start + int(config.audio_codebooks) * int(config.audio_codebook_size)
+    image_start = audio_end
+    image_end = image_start + int(config.image_patch_vocab_size)
+    return image_end, audio_start, audio_end, image_start, image_end
 
 
 def model_dtype() -> Any:
@@ -5109,8 +5391,18 @@ def is_audio_token_id(token_id: int) -> bool:
     return bool(config.enable_audio and audio_token_start <= int(token_id) < audio_token_end)
 
 
+def is_image_token_id(token_id: int) -> bool:
+    if "image_token_start" not in globals() or "image_token_end" not in globals():
+        return False
+    return bool(image_token_start <= int(token_id) < image_token_end)
+
+
 def audio_token_id(codebook: int, code: int) -> int:
     return int(audio_token_start + int(codebook) * config.audio_codebook_size + int(code))
+
+
+def image_token_id(code: int) -> int:
+    return int(image_token_start + (int(code) % int(config.image_patch_vocab_size)))
 
 
 def audio_code_from_token_id(token_id: int) -> tuple[int, int] | None:
@@ -6001,12 +6293,18 @@ def model_blocked_ids_for_generation() -> list[int]:
         token_ids_listen,
         token_ids_user_end,
         token_ids_user_interrupt,
+        token_ids.get("text", -1),
+        token_ids.get("audio", -1),
         token_ids_audio_in,
+        token_ids.get("image", -1),
+        token_ids_image_in,
+        token_ids.get("hybrid", -1),
         token_ids_audio_end,
         token_ids_silence,
         token_ids_text_in,
     ]
     blocked.extend(range(audio_token_start, audio_token_end))
+    blocked.extend(range(image_token_start, image_token_end))
     return blocked
 
 
@@ -6022,13 +6320,18 @@ def token_label(token_id: int) -> str:
         token_ids_model_end: "[MODEL_END]",
         token_ids_session_end: "[SESSION_END]",
         token_ids_user_interrupt: "[USER_INTERRUPT]",
+        token_ids.get("text", -1): "[TEXT]",
         token_ids_audio_in: "[AUDIO_IN]",
+        token_ids.get("audio", -1): "[AUDIO]",
         token_ids_audio_out: "[AUDIO_OUT]",
         token_ids_audio_end: "[AUDIO_END]",
         token_ids_silence: "[SILENCE]",
         token_ids_text_in: "[TEXT_IN]",
         token_ids_text_out: "[TEXT_OUT]",
+        token_ids.get("image", -1): "[IMAGE]",
+        token_ids.get("hybrid", -1): "[HYBRID]",
         token_ids_hybrid_out: "[HYBRID_OUT]",
+        token_ids_image_in: "[IMAGE_IN]",
     }
     if token_id in names:
         return names[token_id]
@@ -6036,6 +6339,8 @@ def token_label(token_id: int) -> str:
     if parsed_audio is not None:
         codebook_idx, code = parsed_audio
         return f"<audio:{codebook_idx}:{code}>"
+    if is_image_token_id(int(token_id)):
+        return f"<image:{int(token_id) - int(image_token_start)}>"
     decoded = tokenizer.decode([int(token_id)], skip_special_tokens=False)
     return decoded if decoded else f"<tok:{token_id}>"
 
@@ -6985,6 +7290,86 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
     }
 
 
+def finite_metric(metrics: dict[str, float], key: str, default: float | None = None) -> float | None:
+    value = metrics.get(key, default)
+    if value is None:
+        return default
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value_f):
+        return default
+    return value_f
+
+
+def mean_score(values: list[float | None], default: float = 0.0) -> float:
+    finite_values = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    return float(np.mean(finite_values)) if finite_values else float(default)
+
+
+def validation_composite_score(metrics: dict[str, float]) -> dict[str, float]:
+    """Propagator-specific validation score for early stopping.
+
+    Higher is better. This combines protocol, text semantics, speech/codebook
+    behavior, duplex behavior, and coverage so early stopping cannot be driven
+    only by plain weighted CE while important multimodal buckets are absent.
+    """
+
+    protocol_score = mean_score(
+        [
+            finite_metric(metrics, "decision_macro_acc"),
+            finite_metric(metrics, "listen_acc"),
+            finite_metric(metrics, "user_end_acc"),
+            finite_metric(metrics, "model_end_acc"),
+        ]
+    )
+    text_score = mean_score(
+        [
+            finite_metric(metrics, "text_task_acc"),
+            finite_metric(metrics, "text_token_acc"),
+        ]
+    )
+    speech_score = mean_score(
+        [
+            finite_metric(metrics, "asr_task_acc"),
+            finite_metric(metrics, "tts_task_acc"),
+            finite_metric(metrics, "audio_main_acc"),
+        ]
+    )
+    audio_aux_score = mean_score([finite_metric(metrics, "audio_aux_token_acc")])
+    duplex_score = finite_metric(metrics, "duplex_task_acc", 0.0) or 0.0
+
+    coverage_checks = [
+        finite_metric(metrics, "decision_total", 0.0) or 0.0,
+        finite_metric(metrics, "listen_total", 0.0) or 0.0,
+        finite_metric(metrics, "user_end_total", 0.0) or 0.0,
+        finite_metric(metrics, "model_end_total", 0.0) or 0.0,
+        finite_metric(metrics, "text_token_total", 0.0) or 0.0,
+        finite_metric(metrics, "audio_token_total", 0.0) or 0.0,
+        finite_metric(metrics, "audio_aux_token_total", 0.0) or 0.0,
+    ]
+    coverage_score = float(np.mean([1.0 if value > 0.0 else 0.0 for value in coverage_checks]))
+
+    composite = (
+        0.25 * protocol_score
+        + 0.25 * text_score
+        + 0.20 * speech_score
+        + 0.10 * audio_aux_score
+        + 0.10 * duplex_score
+        + 0.10 * coverage_score
+    )
+    return {
+        "validation_composite_score": float(composite),
+        "validation_protocol_score": float(protocol_score),
+        "validation_text_score": float(text_score),
+        "validation_speech_score": float(speech_score),
+        "validation_audio_aux_score": float(audio_aux_score),
+        "validation_duplex_score": float(duplex_score),
+        "validation_coverage_score": float(coverage_score),
+    }
+
+
 def run_validation(
     model: PropagatorModel,
     step: int,
@@ -7402,6 +7787,10 @@ def write_edge_memory_report(model: PropagatorModel, output_root: Path) -> None:
             "rope_base": config.rope_base,
             "rope_position_scale": config.rope_position_scale,
             "rope_max_position": config.rope_max_position,
+            "image_recognition_only": config.image_recognition_only,
+            "image_input_resolution": config.image_input_resolution,
+            "image_max_input_resolution": config.image_max_input_resolution,
+            "image_patch_size": config.image_patch_size,
         },
         "serving_recurrent_state_bytes_batch_1": recurrent_state_bytes,
         "training_recurrent_state_bytes_total_batch": recurrent_state_bytes_total_batch,
@@ -7418,7 +7807,7 @@ def write_edge_memory_report(model: PropagatorModel, output_root: Path) -> None:
         "target_budget_bytes": budget_bytes,
         "estimated_param_budget_fraction": q_bytes / max(1, budget_bytes),
         "fits_param_budget": q_bytes <= budget_bytes,
-        "note": "Quantized edge memory is not a training-memory estimate. Without scan rematerialization, XLA may retain time-expanded memory matrices shaped like [unroll, per_device_batch, memory_key_size, memory_value_size] many times across layers and gradients.",
+        "note": "Quantized edge memory is not a training-memory estimate. Without scan rematerialization, XLA may retain time-expanded memory matrices shaped like [unroll, per_device_batch, memory_key_size, memory_value_size] many times across layers and gradients. Image resolution is a preprocessing/runtime setting and is not injected into user prompts.",
     }
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "edge_memory_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -7681,7 +8070,7 @@ def init_global_token_ids() -> None:
     global token_ids_pad, token_ids_unk, token_ids_session, token_ids_user, token_ids_model
     global token_ids_listen, token_ids_user_end, token_ids_model_end, token_ids_session_end, token_ids_user_interrupt
     global token_ids_audio_in, token_ids_audio_out, token_ids_audio_end, token_ids_silence, token_ids_text_in, token_ids_text_out
-    global token_ids_hybrid_out
+    global token_ids_hybrid_out, token_ids_image_in
 
     token_ids_pad = token_ids["pad"]
     token_ids_unk = token_ids["unk"]
@@ -7700,6 +8089,7 @@ def init_global_token_ids() -> None:
     token_ids_text_in = token_ids["text_in"]
     token_ids_text_out = token_ids["text_out"]
     token_ids_hybrid_out = token_ids["hybrid_out"]
+    token_ids_image_in = token_ids["image_in"]
 
 
 def main() -> None:
@@ -7777,6 +8167,7 @@ def main() -> None:
     log_info(f"Tokenizer text vocab size: {text_vocab_size}")
     log_info(f"Model vocab size: {vocab_size}")
     log_info(f"Audio token range: [{audio_token_start}, {audio_token_end})")
+    log_info(f"Image token range: [{image_token_start}, {image_token_end})")
     log_info(f"Tokenizer fingerprint: {tokenizer_fingerprint}")
     log_info(f"Token ids: {json.dumps(token_ids, ensure_ascii=False, indent=2)}")
     log_info(f"Candidate inference head size: {len(candidate_token_ids_host)} / {vocab_size}")
@@ -7832,62 +8223,72 @@ def main() -> None:
     val_asr_task_accs: list[float] = []
     val_tts_task_accs: list[float] = []
     val_duplex_task_accs: list[float] = []
-    best_early_stop_loss = float("inf")
+    val_composite_scores: list[float] = []
+    best_early_stop_score = float("-inf")
     evals_without_improvement = 0
 
-    # Resume from latest checkpoint if exists
-    ckpt_dirs = sorted(list(output_root.glob("step_*")), key=lambda x: int(x.name.split("_")[1]), reverse=True)
-    for ckpt_dir in ckpt_dirs:
-        ckpt_path = ckpt_dir / "checkpoint"
-        if ckpt_path.exists():
-            try:
-                step = int(ckpt_dir.name.split("_")[1])
-                log_info(f"[Checkpoint] Resuming from step {step} at {ckpt_path}")
-                restored_kind = restore_training_checkpoint(checkpointer, ckpt_path, model, optimizer)
-                log_info(f"[Checkpoint] Restored {restored_kind}")
-                start_step = step
+    if config.resume_checkpoint:
+        # Resume from latest checkpoint if exists.
+        ckpt_dirs = sorted(list(output_root.glob("step_*")), key=lambda x: int(x.name.split("_")[1]), reverse=True)
+        for ckpt_dir in ckpt_dirs:
+            ckpt_path = ckpt_dir / "checkpoint"
+            if ckpt_path.exists():
+                try:
+                    step = int(ckpt_dir.name.split("_")[1])
+                    log_info(f"[Checkpoint] Resuming from step {step} at {ckpt_path}")
+                    restored_kind = restore_training_checkpoint(checkpointer, ckpt_path, model, optimizer)
+                    log_info(f"[Checkpoint] Restored {restored_kind}")
+                    start_step = step
 
-                # Try to recover training metrics history
-                metrics_path = output_root / "metrics.jsonl"
-                if metrics_path.exists():
-                    train_by_step: dict[int, float] = {}
-                    val_by_step: dict[int, tuple[float, dict[str, float]]] = {}
-                    with open(metrics_path, "r", encoding="utf-8") as f:
-                        for line in f:
-                            try:
-                                record = json.loads(line)
-                                s = int(record.get("step", 0))
-                                if s <= start_step:
-                                    train_by_step[s] = float(record.get("train_loss", 0.0))
-                                    if "val_loss" in record:
-                                        val_by_step[s] = (float(record["val_loss"]), record.get("metrics", {}))
-                            except Exception:
-                                continue
-                    for s in sorted(train_by_step):
-                        train_loss_steps.append(s)
-                        train_losses.append(train_by_step[s])
-                    for s in sorted(val_by_step):
-                        v_loss, m = val_by_step[s]
-                        val_steps.append(s)
-                        val_losses.append(v_loss)
-                        val_decision_accs.append(m.get("decision_acc", 0.0))
-                        val_decision_macro_accs.append(m.get("decision_macro_acc", float("nan")))
-                        val_user_end_accs.append(m.get("user_end_acc", 0.0))
-                        val_interrupt_accs.append(m.get("interrupt_acc", float("nan")))
-                        val_text_accs.append(m.get("text_token_acc", 0.0))
-                        val_audio_accs.append(m.get("audio_token_acc", 0.0))
-                        val_audio_codebook_accs.append(m.get("audio_codebook_acc", 0.0))
-                        val_audio_aux_token_accs.append(m.get("audio_aux_token_acc", float("nan")))
-                        val_audio_all_codebook_frame_accs.append(m.get("audio_all_codebook_frame_exact_acc", float("nan")))
-                        val_main_ces.append(m.get("main_ce", float("nan")))
-                        val_aux_audio_ces.append(m.get("aux_audio_ce", float("nan")))
-                        val_text_task_accs.append(m.get("text_task_acc", 0.0))
-                        val_asr_task_accs.append(m.get("asr_task_acc", 0.0))
-                        val_tts_task_accs.append(m.get("tts_task_acc", 0.0))
-                        val_duplex_task_accs.append(m.get("duplex_task_acc", 0.0))
-                break
-            except Exception as e:
-                log_info(f"[Checkpoint] Failed to restore from {ckpt_path}: {e}")
+                    # Try to recover training metrics history.
+                    metrics_path = output_root / "metrics.jsonl"
+                    if metrics_path.exists():
+                        train_by_step: dict[int, float] = {}
+                        val_by_step: dict[int, tuple[float, dict[str, float]]] = {}
+                        with open(metrics_path, "r", encoding="utf-8") as f:
+                            for line in f:
+                                try:
+                                    record = json.loads(line)
+                                    s = int(record.get("step", 0))
+                                    if s <= start_step:
+                                        train_by_step[s] = float(record.get("train_loss", 0.0))
+                                        if "val_loss" in record:
+                                            val_by_step[s] = (float(record["val_loss"]), record.get("metrics", {}))
+                                except Exception:
+                                    continue
+                        for s in sorted(train_by_step):
+                            train_loss_steps.append(s)
+                            train_losses.append(train_by_step[s])
+                        for s in sorted(val_by_step):
+                            v_loss, m = val_by_step[s]
+                            val_steps.append(s)
+                            val_losses.append(v_loss)
+                            val_decision_accs.append(m.get("decision_acc", 0.0))
+                            val_decision_macro_accs.append(m.get("decision_macro_acc", float("nan")))
+                            val_user_end_accs.append(m.get("user_end_acc", 0.0))
+                            val_interrupt_accs.append(m.get("interrupt_acc", float("nan")))
+                            val_text_accs.append(m.get("text_token_acc", 0.0))
+                            val_audio_accs.append(m.get("audio_token_acc", 0.0))
+                            val_audio_codebook_accs.append(m.get("audio_codebook_acc", 0.0))
+                            val_audio_aux_token_accs.append(m.get("audio_aux_token_acc", float("nan")))
+                            val_audio_all_codebook_frame_accs.append(m.get("audio_all_codebook_frame_exact_acc", float("nan")))
+                            val_main_ces.append(m.get("main_ce", float("nan")))
+                            val_aux_audio_ces.append(m.get("aux_audio_ce", float("nan")))
+                            val_text_task_accs.append(m.get("text_task_acc", 0.0))
+                            val_asr_task_accs.append(m.get("asr_task_acc", 0.0))
+                            val_tts_task_accs.append(m.get("tts_task_acc", 0.0))
+                            val_duplex_task_accs.append(m.get("duplex_task_acc", 0.0))
+                            composite_record = validation_composite_score(m)
+                            val_composite_scores.append(
+                                float(m.get("validation_composite_score", composite_record["validation_composite_score"]))
+                            )
+                        if val_composite_scores:
+                            best_early_stop_score = max(val_composite_scores)
+                    break
+                except Exception as e:
+                    log_info(f"[Checkpoint] Failed to restore from {ckpt_path}: {e}")
+    else:
+        log_info("[Checkpoint] Resume disabled; starting from fresh model and optimizer state")
 
     write_edge_memory_report(model, output_root)
 
@@ -8031,8 +8432,10 @@ def main() -> None:
                         f"#{attempt + 1}: {msg.splitlines()[0]}"
                     )
 
-            if v_loss < best_early_stop_loss - float(config.early_stopping_min_delta):
-                best_early_stop_loss = v_loss
+            v_metrics.update(validation_composite_score(v_metrics))
+            v_score = float(v_metrics["validation_composite_score"])
+            if v_score > best_early_stop_score + float(config.early_stopping_min_delta):
+                best_early_stop_score = v_score
                 evals_without_improvement = 0
             else:
                 evals_without_improvement += 1
@@ -8058,6 +8461,7 @@ def main() -> None:
             val_asr_task_accs.append(v_metrics.get("asr_task_acc", float("nan")))
             val_tts_task_accs.append(v_metrics.get("tts_task_acc", float("nan")))
             val_duplex_task_accs.append(v_metrics.get("duplex_task_acc", float("nan")))
+            val_composite_scores.append(v_score)
 
             out_dir = output_root / f"step_{act_step}"
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -8103,6 +8507,13 @@ def main() -> None:
             save_metric_plot(val_steps, val_asr_task_accs, out_dir / "val_asr_task_acc.png", "Validation ASR Task Accuracy", act_step)
             save_metric_plot(val_steps, val_tts_task_accs, out_dir / "val_tts_task_acc.png", "Validation TTS Task Accuracy", act_step)
             save_metric_plot(val_steps, val_duplex_task_accs, out_dir / "val_duplex_task_acc.png", "Validation Duplex Task Accuracy", act_step)
+            save_metric_plot(
+                val_steps,
+                val_composite_scores,
+                out_dir / "val_composite_score.png",
+                "Validation Propagator Composite Score",
+                act_step,
+            )
 
             text_meta = generate_text_eval_samples(
                 model,
@@ -8135,9 +8546,9 @@ def main() -> None:
             )
             prune_local_eval_dirs(output_root, act_step)
 
-            log_info(f"\n[Eval] CE={v_loss:.4f}")
+            log_info(f"\n[Eval] CE={v_loss:.4f}, composite={v_score:.4f}")
             log_info(
-                f"[Early Stop] best={best_early_stop_loss:.4f}, "
+                f"[Early Stop] best_composite={best_early_stop_score:.4f}, "
                 f"without_improvement={evals_without_improvement}/{config.early_stopping_patience}"
             )
             log_info(json.dumps(v_metrics, ensure_ascii=False, indent=2))
@@ -8179,7 +8590,7 @@ def main() -> None:
 
         if should_early_stop:
             log_info(
-                f"[Early Stop] stopping at step {act_step}: validation did not improve by "
+                f"[Early Stop] stopping at step {act_step}: validation composite did not improve by "
                 f"{config.early_stopping_min_delta} for {config.early_stopping_patience} evaluations"
             )
             break

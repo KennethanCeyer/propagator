@@ -14,12 +14,29 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 cd "$PROJECT_ROOT"
 
+declare -A USER_ENV_OVERRIDES=()
+for key in \
+    MODEL_PRESET OUTPUT_ROOT CACHE_ROOT DATASET_MIX_FILE DATASET_MIX FORCE_DATASET_MIX_FILE \
+    MAX_STEPS EPOCHS GCS_BACKUP_DIR VALIDATION_CONTROL_BATCHES TRAIN_UNROLL_LEN \
+    CHECKPOINT_RESUME FORCE_TRAIN_TOKENIZER TOKENIZER_TRAIN_ROWS \
+    EARLY_STOPPING_PATIENCE EARLY_STOPPING_MIN_DELTA \
+    IMAGE_INPUT_RESOLUTION IMAGE_MAX_INPUT_RESOLUTION IMAGE_PATCH_SIZE IMAGE_PATCH_VOCAB_SIZE IMAGE_TOKENS_PER_SAMPLE
+do
+    if [[ ${!key+x} ]]; then
+        USER_ENV_OVERRIDES["$key"]="${!key}"
+    fi
+done
+
 if [[ -f .env ]]; then
     set -a
     # shellcheck disable=SC1091
     source .env
     set +a
 fi
+for key in "${!USER_ENV_OVERRIDES[@]}"; do
+    printf -v "$key" '%s' "${USER_ENV_OVERRIDES[$key]}"
+    export "$key"
+done
 
 mkdir -p logs
 
@@ -66,10 +83,18 @@ EVAL_AUDIO_SAMPLES="${EVAL_AUDIO_SAMPLES:-2}"
 EVAL_AUDIO_SECONDS="${EVAL_AUDIO_SECONDS:-10.0}"
 EVAL_AUDIO_INPUT_AUDIO_SECONDS="${EVAL_AUDIO_INPUT_AUDIO_SECONDS:-5.0}"
 AUDIO_MIN_GENERATION_SECONDS="${AUDIO_MIN_GENERATION_SECONDS:-1.0}"
+IMAGE_INPUT_RESOLUTION="${IMAGE_INPUT_RESOLUTION:-160}"
+IMAGE_MAX_INPUT_RESOLUTION="${IMAGE_MAX_INPUT_RESOLUTION:-192}"
+IMAGE_PATCH_SIZE="${IMAGE_PATCH_SIZE:-16}"
+IMAGE_PATCH_VOCAB_SIZE="${IMAGE_PATCH_VOCAB_SIZE:-1024}"
+IMAGE_TOKENS_PER_SAMPLE="${IMAGE_TOKENS_PER_SAMPLE:-64}"
 ASR_EVAL_CASE_FOLD="${ASR_EVAL_CASE_FOLD:-0}"
 NO_ASR_EVAL_CASE_FOLD="${NO_ASR_EVAL_CASE_FOLD:-0}"
 VALIDATION_BATCHES="${VALIDATION_BATCHES:-16}"
 LOCAL_CHECKPOINT_KEEP="${LOCAL_CHECKPOINT_KEEP:-1}"
+CHECKPOINT_RESUME="${CHECKPOINT_RESUME:-0}"
+FORCE_TRAIN_TOKENIZER="${FORCE_TRAIN_TOKENIZER:-0}"
+TOKENIZER_TRAIN_ROWS="${TOKENIZER_TRAIN_ROWS:-0}"
 DATA_PACK_COUNT="${DATA_PACK_COUNT:-0}"
 DATA_PACK_INDEX="${DATA_PACK_INDEX:-0}"
 MODEL_PRESET="${MODEL_PRESET:-full}"
@@ -83,13 +108,13 @@ case "${MODEL_PRESET,,}" in
         : "${MEMORY_VALUE_SIZE:=384}"
         : "${ASSOCIATIVE_GROUPS:=4}"
         : "${MLP_MULTIPLIER:=3}"
-        : "${MOE_NUM_EXPERTS:=2}"
+        : "${MOE_NUM_EXPERTS:=1}"
         : "${MOE_TOP_K:=1}"
         : "${BATCH_SIZE:=0}"
         : "${AUTO_BATCH_MAX_PER_DEVICE:=8}"
         : "${AUTO_BATCH_MULTIPLE_PER_DEVICE:=4}"
-        : "${TOKENIZER_PATH:=assets/tokenizer-byte-bpe-32000.json}"
-        : "${TOKENIZER_VOCAB_SIZE:=32000}"
+        : "${TOKENIZER_PATH:=assets/tokenizer-byte-bpe-16000.json}"
+        : "${TOKENIZER_VOCAB_SIZE:=16000}"
         ;;
     *)
         echo "MODEL_PRESET must be full or sl2610; got: $MODEL_PRESET" >&2
@@ -125,6 +150,9 @@ if [[ "${POST_TRAIN:-0}" =~ ^(1|true|yes|on)$ ]]; then
     WARMUP_STEPS="${WARMUP_STEPS:-1000}"
 else
     DATASET_MIX_FILE="${DATASET_MIX_FILE:-data/propagator_dataset_mix.json}"
+fi
+if [[ ! ${USER_ENV_OVERRIDES[DATASET_MIX]+x} || "${FORCE_DATASET_MIX_FILE:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    unset DATASET_MIX
 fi
 PROPAGATOR_DISK_ROOT="${PROPAGATOR_DISK_ROOT:-/mnt/disks/propagator-cache}"
 if [[ -z "${CACHE_ROOT:-}" && -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
@@ -176,11 +204,12 @@ TRAIN_ARGS=(
     --rope-position-scale "${ROPE_POSITION_SCALE:-16}"
     --rope-max-position "${ROPE_MAX_POSITION:-1048576}"
     --use-swiglu
-    --train-unroll-len "${TRAIN_UNROLL_LEN:-32}"
+    --train-unroll-len "${TRAIN_UNROLL_LEN:-64}"
     --batch-size "${BATCH_SIZE:-0}"
     --output-root "${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
     --tokenizer-path "${TOKENIZER_PATH:-assets/tokenizer-byte-bpe-16000.json}"
     --tokenizer-vocab-size "${TOKENIZER_VOCAB_SIZE:-16000}"
+    --tokenizer-train-rows "$TOKENIZER_TRAIN_ROWS"
     --max-train-chunks "${MAX_TRAIN_CHUNKS:-0}"
     --max-val-chunks "${MAX_VAL_CHUNKS:-0}"
     --data-pack-count "$DATA_PACK_COUNT"
@@ -201,7 +230,7 @@ TRAIN_ARGS=(
     --cache-read-memory-fraction "${CACHE_READ_MEMORY_FRACTION:-0.50}"
     --same-split-validation-stride "${SAME_SPLIT_VALIDATION_STRIDE:-10}"
     --same-split-validation-offset "${SAME_SPLIT_VALIDATION_OFFSET:-0}"
-    --validation-control-batches "${VALIDATION_CONTROL_BATCHES:-0}"
+    --validation-control-batches "${VALIDATION_CONTROL_BATCHES:-8}"
     --synthetic-control-train-examples "${SYNTHETIC_CONTROL_TRAIN_EXAMPLES:-2048}"
     --synthetic-control-val-examples "${SYNTHETIC_CONTROL_VAL_EXAMPLES:-512}"
     --synthetic-control-train-rate "${SYNTHETIC_CONTROL_TRAIN_RATE:-0.05}"
@@ -227,8 +256,13 @@ TRAIN_ARGS=(
     --audio-min-generation-seconds "$AUDIO_MIN_GENERATION_SECONDS"
     --audio-eval-normalize-rms "${AUDIO_EVAL_NORMALIZE_RMS:-0.06}"
     --audio-low-rms-threshold "${AUDIO_LOW_RMS_THRESHOLD:-0.005}"
+    --image-input-resolution "$IMAGE_INPUT_RESOLUTION"
+    --image-max-input-resolution "$IMAGE_MAX_INPUT_RESOLUTION"
+    --image-patch-size "$IMAGE_PATCH_SIZE"
+    --image-patch-vocab-size "$IMAGE_PATCH_VOCAB_SIZE"
+    --image-tokens-per-sample "$IMAGE_TOKENS_PER_SAMPLE"
     --train-log-every "${TRAIN_LOG_EVERY:-1000}"
-    --early-stopping-patience "${EARLY_STOPPING_PATIENCE:-12}"
+    --early-stopping-patience "${EARLY_STOPPING_PATIENCE:-0}"
     --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA:-0.01}"
     --checkpoint-every "$CHECKPOINT_EVERY"
     --local-checkpoint-keep "$LOCAL_CHECKPOINT_KEEP"
@@ -238,7 +272,7 @@ TRAIN_ARGS=(
     --auto-batch-multiple-per-device "${AUTO_BATCH_MULTIPLE_PER_DEVICE:-8}"
     --auto-batch-memory-util "${AUTO_BATCH_MEMORY_UTIL:-0.78}"
     --epochs "${EPOCHS:-3}"
-    --max-steps "${MAX_STEPS:-0}"
+    --max-steps "${MAX_STEPS:-30000}"
     --learning-rate "${LEARNING_RATE:-1e-4}"
     --warmup-steps "${WARMUP_STEPS:-5000}"
     --write-rate "${WRITE_RATE:-0.02}"
@@ -308,6 +342,18 @@ if [[ -n "${AUDIO_MIN_GENERATION_TOKENS:-}" ]]; then
     TRAIN_ARGS+=(--audio-min-generation-tokens "$AUDIO_MIN_GENERATION_TOKENS")
 fi
 
+case "${FORCE_TRAIN_TOKENIZER,,}" in
+    1|true|yes|on)
+        TRAIN_ARGS+=(--force-train-tokenizer)
+        ;;
+esac
+
+case "${CHECKPOINT_RESUME,,}" in
+    0|false|no|off)
+        TRAIN_ARGS+=(--no-checkpoint-resume)
+        ;;
+esac
+
 if [[ -n "$GCS_BACKUP_DIR" ]]; then
     TRAIN_ARGS+=(--gcs-backup-dir "$GCS_BACKUP_DIR")
 fi
@@ -331,8 +377,11 @@ else
 fi
 
 if [ "$FOREGROUND" = true ]; then
-    echo "Starting training in foreground..."
-    "$PYTHON_BIN" "$PROJECT_ROOT/train.py" "${TRAIN_ARGS[@]}"
+    LOG_PATH="$PROJECT_ROOT/logs/train_$(date -u +%Y%m%dT%H%M%SZ).log"
+    ln -sfn "$(basename "$LOG_PATH")" "$PROJECT_ROOT/logs/train.latest.log"
+    echo "Starting training in foreground. Writing logs to $LOG_PATH"
+    "$PYTHON_BIN" -u "$PROJECT_ROOT/train.py" "${TRAIN_ARGS[@]}" \
+        2>&1 | tee "$LOG_PATH"
 else
     echo "Starting training in background..."
     LOG_PATH="$PROJECT_ROOT/logs/train_$(date -u +%Y%m%dT%H%M%SZ).log"

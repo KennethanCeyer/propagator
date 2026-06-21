@@ -1,50 +1,67 @@
 [
   {
     "name": "json",
+    "data_files": "data/propagator_instruction_balanced_seed.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "duplex_chat",
+    "streaming": false,
+    "repeat": 100,
+    "weight": 0.10
+  },
+  {
+    "name": "json",
+    "data_files": "data/regression/sample_05_format_following.jsonl",
+    "split": "train",
+    "validation_split": "train",
+    "mode": "duplex_chat",
+    "streaming": false,
+    "repeat": 40,
+    "weight": 0.05
+  },
+  {
+    "name": "json",
     "data_files": "data/propagator_identity.jsonl",
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",
     "streaming": false,
-    "repeat": 80,
-    "weight": 0.025
+    "repeat": 3,
+    "weight": 0.02
   },
   {
     "name": "json",
-    "data_files": "data/propagator_posttrain_10k.jsonl",
+    "data_files": "data/propagator_image_recognition_seed.jsonl",
     "split": "train",
     "validation_split": "train",
-    "mode": "duplex_chat",
+    "mode": "image_recognition",
     "streaming": false,
-    "repeat": 2,
-    "weight": 0.025
+    "repeat": 180,
+    "weight": 0.06
   },
   {
-    "name": "KurtDu/EchoX-Dialogues-Plus",
+    "name": "json",
+    "data_files": "data/propagator_text_image_seed.jsonl",
     "split": "train",
     "validation_split": "train",
-    "mode": "echox_s2s_dialogue",
-    "echox_subsets": [
-      "S2S-QA/AudioQA"
-    ],
-    "target_modality": "hybrid",
-    "max_wer": 0.25,
-    "estimated_chunks": 6500000,
-    "weight": 0.20
+    "mode": "image_recognition",
+    "streaming": false,
+    "repeat": 180,
+    "weight": 0.05
   },
   {
     "name": "xinrongzhang2022/Duplex-UltraChat",
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",
-    "weight": 0.11
+    "weight": 0.12
   },
   {
     "name": "databricks/databricks-dolly-15k",
     "split": "train",
     "validation_split": "train",
     "mode": "dolly_instruction",
-    "weight": 0.04
+    "weight": 0.08
   },
   {
     "name": "HuggingFaceFW/fineweb-edu",
@@ -54,7 +71,7 @@
     "mode": "plain_text",
     "text_key": "text",
     "streaming": true,
-    "weight": 0.12
+    "weight": 0.08
   },
   {
     "name": "wikimedia/wikipedia",
@@ -64,105 +81,114 @@
     "mode": "plain_text",
     "text_key": "text",
     "streaming": true,
+    "weight": 0.03
+  },
+  {
+    "name": "shangeth/libritts-r-mimi-codes",
+    "split": "train_clean_100",
+    "validation_split": "dev_clean",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.35, "tts": 0.50, "hybrid": 0.15},
+    "streaming": true,
+    "estimated_chunks": 105000,
+    "weight": 0.06
+  },
+  {
+    "name": "shangeth/libritts-r-mimi-codes",
+    "split": "train_clean_360",
+    "validation_split": "dev_clean",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.35, "tts": 0.50, "hybrid": 0.15},
+    "streaming": true,
+    "estimated_chunks": 370000,
+    "weight": 0.07
+  },
+  {
+    "name": "shangeth/libritts-r-mimi-codes",
+    "split": "train_other_500",
+    "validation_split": "dev_other",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.35, "tts": 0.50, "hybrid": 0.15},
+    "streaming": true,
+    "estimated_chunks": 630000,
+    "weight": 0.07
+  },
+  {
+    "name": "shangeth/librispeech-mimi-codes",
+    "split": "train_clean_100",
+    "validation_split": "dev_clean",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.70, "tts": 0.20, "hybrid": 0.10},
+    "streaming": true,
+    "estimated_chunks": 120000,
     "weight": 0.04
   },
   {
-    "name": "openslr/librispeech_asr",
-    "config": "all",
-    "split": "train.clean.360",
-    "validation_split": "validation.clean",
-    "mode": "audio_asr",
-    "audio_task_mix": {
-      "asr": 0.75,
-      "tts": 0.25
-    },
-    "weight": 0.055
+    "name": "shangeth/librispeech-mimi-codes",
+    "split": "train_clean_360",
+    "validation_split": "dev_clean",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.70, "tts": 0.20, "hybrid": 0.10},
+    "streaming": true,
+    "estimated_chunks": 420000,
+    "weight": 0.04
   },
   {
-    "name": "openslr/librispeech_asr",
-    "config": "all",
-    "split": "train.other.500",
-    "validation_split": "validation.other",
-    "mode": "audio_asr",
-    "audio_task_mix": {
-      "asr": 0.80,
-      "tts": 0.20
-    },
-    "weight": 0.055
+    "name": "shangeth/librispeech-mimi-codes",
+    "split": "train_other_500",
+    "validation_split": "dev_other",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.70, "tts": 0.20, "hybrid": 0.10},
+    "streaming": true,
+    "estimated_chunks": 600000,
+    "weight": 0.03
   },
   {
-    "name": "google/fleurs",
-    "config": "en_us",
-    "split": "train",
-    "validation_split": "validation",
-    "mode": "audio_asr",
-    "transcript_key": "transcription",
-    "audio_task_mix": {
-      "asr": 0.85,
-      "tts": 0.15
-    },
-    "weight": 0.045
-  },
-  {
-    "name": "PolyAI/minds14",
-    "config": "en-US",
+    "name": "shangeth/vctk-mimi-codes",
     "split": "train",
     "validation_split": "train",
-    "mode": "audio_asr",
-    "transcript_key": "english_transcription",
-    "audio_task_mix": {
-      "asr": 0.90,
-      "tts": 0.10
-    },
-    "weight": 0.015
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.35, "tts": 0.55, "hybrid": 0.10},
+    "streaming": true,
+    "estimated_chunks": 300000,
+    "weight": 0.03
   },
   {
-    "name": "facebook/voxpopuli",
-    "config": "en",
+    "name": "shangeth/jenny-mimi-codes",
     "split": "train",
-    "validation_split": "validation",
-    "mode": "audio_asr",
-    "transcript_key": "normalized_text",
-    "audio_task_mix": {
-      "asr": 0.85,
-      "tts": 0.15
-    },
-    "weight": 0.075
+    "validation_split": "train",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.15, "tts": 0.75, "hybrid": 0.10},
+    "streaming": true,
+    "estimated_chunks": 180000,
+    "weight": 0.02
   },
   {
-    "name": "edinburghcstr/ami",
-    "config": "ihm",
+    "name": "shangeth/ljspeech-mimi-codes",
     "split": "train",
-    "validation_split": "validation",
-    "mode": "audio_asr",
-    "transcript_key": "text",
-    "audio_task_mix": {
-      "asr": 1.0
-    },
-    "weight": 0.065
-  },
-  {
-    "name": "blabble-io/libritts_r",
-    "config": "clean",
-    "split": "train.clean.360",
-    "validation_split": "test.clean",
-    "mode": "audio_asr",
-    "transcript_key": "text_normalized",
-    "audio_task_mix": {
-      "asr": 0.10,
-      "tts": 0.90
-    },
-    "weight": 0.09
-  },
-  {
-    "name": "distil-whisper/librispeech_asr",
-    "split": "train.clean.100",
-    "validation_split": "validation.clean",
-    "mode": "audio_asr",
-    "audio_task_mix": {
-      "asr": 0.75,
-      "tts": 0.25
-    },
-    "weight": 0.045
+    "validation_split": "train",
+    "mode": "mimi_codes_speech_text",
+    "text_key": "text",
+    "codes_key": "codes",
+    "audio_task_mix": {"asr": 0.20, "tts": 0.70, "hybrid": 0.10},
+    "streaming": true,
+    "estimated_chunks": 120000,
+    "weight": 0.01
   }
 ]

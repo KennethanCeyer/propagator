@@ -19,9 +19,13 @@ def initialize_globals(cfg: train.PropagatorConfig) -> None:
     train.tokenizer = Tokenizer.from_file(cfg.tokenizer_path)
     train.token_ids = train.ensure_special_tokens(train.tokenizer)
     train.text_vocab_size = train.tokenizer.get_vocab_size()
-    train.vocab_size, train.audio_token_start, train.audio_token_end = train.compute_vocab_sizes(
-        train.text_vocab_size
-    )
+    (
+        train.vocab_size,
+        train.audio_token_start,
+        train.audio_token_end,
+        train.image_token_start,
+        train.image_token_end,
+    ) = train.compute_vocab_sizes(train.text_vocab_size)
     train.init_global_token_ids()
 
 
