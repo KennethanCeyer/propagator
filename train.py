@@ -23,6 +23,8 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import socket
+socket.setdefaulttimeout(120.0)
 import urllib.request
 import warnings
 import wave
@@ -2853,7 +2855,7 @@ def _extract_image_value(row: dict, spec: dict[str, Any] | None = None) -> Any |
     keys = []
     if spec and spec.get("image_key"):
         keys.append(str(spec["image_key"]))
-    keys.extend(["image", "frame", "camera_image", "camera_frame", "pixels"])
+    keys.extend(["image", "images", "frame", "camera_image", "camera_frame", "pixels"])
     for key in keys:
         if key in row and row[key] is not None:
             return row[key]
@@ -2863,6 +2865,8 @@ def _extract_image_value(row: dict, spec: dict[str, Any] | None = None) -> Any |
 def _image_value_to_array(value: Any) -> np.ndarray | None:
     if value is None:
         return None
+    if isinstance(value, (list, tuple)) and len(value) > 0:
+        value = value[0]
     if isinstance(value, np.ndarray):
         return value
     if isinstance(value, dict):
@@ -2970,11 +2974,14 @@ def tokenize_image_recognition(row: dict, spec: dict[str, Any] | None = None) ->
     question_keys = [question_key] if question_key else []
     question_keys.extend(["question", "prompt", "query"])
     answer_keys = [answer_key] if answer_key else []
-    answer_keys.extend(["answer", "response", "label", "caption"])
+    answer_keys.extend(["answer", "response", "label", "caption", "multiple_choice_answer"])
 
     image_text = first_nonempty_string(row, image_text_keys)
     question = first_nonempty_string(row, question_keys) or "Describe the image."
     answer = first_nonempty_string(row, answer_keys)
+    if not image_text:
+        if _extract_image_value(row, spec) is not None:
+            image_text = "image"
     if not image_text:
         raise DataQualityError("Image recognition row has no image description or metadata text")
     if not answer:
@@ -4797,21 +4804,28 @@ def tokenize_dataset_rows(
     )
 
     ctx, mp_method = _tokenization_mp_context()
-    log_info(
-        f"[Tokenize] multiprocessing method={mp_method}, imap_chunk_size={int(config.tokenize_imap_chunk_size or 0)} "
-        f"maxtasks_per_child={max(0, int(config.tokenize_maxtasks_per_child or 0))}"
-    )
-
-    pool = ctx.Pool(
-        processes=num_workers,
-        maxtasksperchild=max(0, int(config.tokenize_maxtasks_per_child or 0)) or None,
-    )
-    _ACTIVE_POOLS.append(pool)
     env_imap = int(config.tokenize_imap_chunk_size or 0)
     if env_imap > 0:
         imap_chunk_size = max(1, env_imap)
     else:
         imap_chunk_size = max(1, min(16, row_batch_size))
+    maxtasks_per_child = max(0, int(config.tokenize_maxtasks_per_child or 0))
+    approx_rows_per_child = maxtasks_per_child * imap_chunk_size * row_batch_size if maxtasks_per_child > 0 else 0
+    recycle_text = (
+        f", approx_rows_per_child={approx_rows_per_child}"
+        if approx_rows_per_child > 0
+        else ", worker_recycle=disabled"
+    )
+    log_info(
+        f"[Tokenize] multiprocessing method={mp_method}, imap_chunk_size={imap_chunk_size} "
+        f"maxtasks_per_child={maxtasks_per_child}{recycle_text}"
+    )
+
+    pool = ctx.Pool(
+        processes=num_workers,
+        maxtasksperchild=maxtasks_per_child or None,
+    )
+    _ACTIVE_POOLS.append(pool)
     stop_early = False
     pool_completed = False
     display_progress_total = int(estimated_chunks) if int(estimated_chunks) > 0 else max(1, int(effective_max_chunks))

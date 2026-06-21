@@ -7,17 +7,7 @@
     "mode": "duplex_chat",
     "streaming": false,
     "repeat": 100,
-    "weight": 0.10
-  },
-  {
-    "name": "json",
-    "data_files": "data/regression/sample_05_format_following.jsonl",
-    "split": "train",
-    "validation_split": "train",
-    "mode": "duplex_chat",
-    "streaming": false,
-    "repeat": 40,
-    "weight": 0.05
+    "weight": 0.1
   },
   {
     "name": "json",
@@ -30,24 +20,12 @@
     "weight": 0.02
   },
   {
-    "name": "json",
-    "data_files": "data/propagator_image_recognition_seed.jsonl",
+    "name": "HuggingFaceM4/VQAv2",
     "split": "train",
-    "validation_split": "train",
+    "validation_split": "validation",
     "mode": "image_recognition",
     "streaming": false,
-    "repeat": 180,
-    "weight": 0.06
-  },
-  {
-    "name": "json",
-    "data_files": "data/propagator_text_image_seed.jsonl",
-    "split": "train",
-    "validation_split": "train",
-    "mode": "image_recognition",
-    "streaming": false,
-    "repeat": 180,
-    "weight": 0.05
+    "weight": 0.16
   },
   {
     "name": "xinrongzhang2022/Duplex-UltraChat",
@@ -90,7 +68,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.35, "tts": 0.50, "hybrid": 0.15},
+    "audio_task_mix": {
+      "asr": 0.35,
+      "tts": 0.5,
+      "hybrid": 0.15
+    },
     "streaming": true,
     "estimated_chunks": 105000,
     "weight": 0.06
@@ -102,7 +84,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.35, "tts": 0.50, "hybrid": 0.15},
+    "audio_task_mix": {
+      "asr": 0.35,
+      "tts": 0.5,
+      "hybrid": 0.15
+    },
     "streaming": true,
     "estimated_chunks": 370000,
     "weight": 0.07
@@ -114,7 +100,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.35, "tts": 0.50, "hybrid": 0.15},
+    "audio_task_mix": {
+      "asr": 0.35,
+      "tts": 0.5,
+      "hybrid": 0.15
+    },
     "streaming": true,
     "estimated_chunks": 630000,
     "weight": 0.07
@@ -126,7 +116,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.70, "tts": 0.20, "hybrid": 0.10},
+    "audio_task_mix": {
+      "asr": 0.7,
+      "tts": 0.2,
+      "hybrid": 0.1
+    },
     "streaming": true,
     "estimated_chunks": 120000,
     "weight": 0.04
@@ -138,7 +132,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.70, "tts": 0.20, "hybrid": 0.10},
+    "audio_task_mix": {
+      "asr": 0.7,
+      "tts": 0.2,
+      "hybrid": 0.1
+    },
     "streaming": true,
     "estimated_chunks": 420000,
     "weight": 0.04
@@ -150,7 +148,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.70, "tts": 0.20, "hybrid": 0.10},
+    "audio_task_mix": {
+      "asr": 0.7,
+      "tts": 0.2,
+      "hybrid": 0.1
+    },
     "streaming": true,
     "estimated_chunks": 600000,
     "weight": 0.03
@@ -162,7 +164,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.35, "tts": 0.55, "hybrid": 0.10},
+    "audio_task_mix": {
+      "asr": 0.35,
+      "tts": 0.55,
+      "hybrid": 0.1
+    },
     "streaming": true,
     "estimated_chunks": 300000,
     "weight": 0.03
@@ -174,7 +180,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.15, "tts": 0.75, "hybrid": 0.10},
+    "audio_task_mix": {
+      "asr": 0.15,
+      "tts": 0.75,
+      "hybrid": 0.1
+    },
     "streaming": true,
     "estimated_chunks": 180000,
     "weight": 0.02
@@ -186,7 +196,11 @@
     "mode": "mimi_codes_speech_text",
     "text_key": "text",
     "codes_key": "codes",
-    "audio_task_mix": {"asr": 0.20, "tts": 0.70, "hybrid": 0.10},
+    "audio_task_mix": {
+      "asr": 0.2,
+      "tts": 0.7,
+      "hybrid": 0.1
+    },
     "streaming": true,
     "estimated_chunks": 120000,
     "weight": 0.01

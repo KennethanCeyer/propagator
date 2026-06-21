@@ -1,7 +1,7 @@
 [
   {
     "name": "json",
-    "data_files": "data/propagator_posttrain_10k.jsonl",
+    "data_files": "data/propagator_posttrain_cleaned.jsonl",
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",
@@ -20,24 +20,12 @@
     "weight": 0.12
   },
   {
-    "name": "json",
-    "data_files": "data/propagator_image_recognition_seed.jsonl",
+    "name": "HuggingFaceM4/VQAv2",
     "split": "train",
-    "validation_split": "train",
+    "validation_split": "validation",
     "mode": "image_recognition",
-    "streaming": false,
-    "repeat": 120,
-    "weight": 0.05
-  },
-  {
-    "name": "json",
-    "data_files": "data/propagator_text_image_seed.jsonl",
-    "split": "train",
-    "validation_split": "train",
-    "mode": "image_recognition",
-    "streaming": false,
-    "repeat": 120,
-    "weight": 0.10
+    "streaming": true,
+    "weight": 0.15
   },
   {
     "name": "json",
@@ -54,7 +42,7 @@
     "split": "train",
     "validation_split": "train",
     "mode": "dolly_instruction",
-    "weight": 0.20
+    "weight": 0.2
   },
   {
     "name": "xinrongzhang2022/Duplex-UltraChat",

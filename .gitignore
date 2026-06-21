@@ -10,3 +10,4 @@ helpers/
 *.bin
 *.json.meta
 *.log
+nohup.out
