@@ -291,7 +291,7 @@ val_control_stream_ids: np.ndarray | None = None
 val_control_chunk_positions: np.ndarray | None = None
 val_control_chunk_task_ids: np.ndarray | None = None
 
-VALIDATION_METRIC_SIZE = 40
+VALIDATION_METRIC_SIZE = 44
 
 SPECIAL_TOKENS = [
     "[PAD]",
@@ -479,6 +479,13 @@ class PropagatorConfig(BaseSettings):
             {"name": "image_recognition", "chunks": ["A red mug is on a desk in the image.", "What object is visible?"]},
             {"name": "architecture", "chunks": ["In one sentence,", "how does Propagator store context?"]},
             {"name": "turn_policy_silence", "chunks": ["I am still speaking", "[SILENCE]", "[SILENCE]"]},
+        ],
+        separators=(",", ":"),
+    )
+    eval_image_cases: str = json.dumps(
+        [
+            {"name": "red_mug", "image_text": "A red mug is on a desk.", "question": "What object is visible?"},
+            {"name": "blue_car", "image_text": "A blue car is parked on the street.", "question": "What color is the car?"},
         ],
         separators=(",", ":"),
     )
@@ -5836,18 +5843,18 @@ class PropagatorModel(nnx.Module):
                     jnp.sum(jnp.where(aux_loss_mask, step_weight, 0.0).astype(jnp.float32)),
                 )
 
-                # Task separation (0: Text, 1: ASR, 2: TTS, 3: Duplex)
-                task_correct = jnp.zeros(4, dtype=jnp.float32)
-                task_total = jnp.zeros(4, dtype=jnp.float32)
-                task_loss_sum = jnp.zeros(4, dtype=jnp.float32)
-                task_weight_sum = jnp.zeros(4, dtype=jnp.float32)
+                # Task separation (0: Text, 1: ASR, 2: TTS, 3: Duplex, 4: Image)
+                task_correct = jnp.zeros(5, dtype=jnp.float32)
+                task_total = jnp.zeros(5, dtype=jnp.float32)
+                task_loss_sum = jnp.zeros(5, dtype=jnp.float32)
+                task_weight_sum = jnp.zeros(5, dtype=jnp.float32)
                 if task_ids is not None:
                     token_correct = jnp.logical_and(correct, jnp.logical_or(text_mask, audio_mask)).astype(jnp.float32)
                     token_total = jnp.logical_or(text_mask, audio_mask).astype(jnp.float32)
-                    task_correct = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_correct, 0.0)))(jnp.arange(4))
-                    task_total = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_total, 0.0)))(jnp.arange(4))
-                    task_loss_sum = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, combined_loss, 0.0)))(jnp.arange(4))
-                    task_weight_sum = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, combined_weight, 0.0)))(jnp.arange(4))
+                    task_correct = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_correct, 0.0)))(jnp.arange(5))
+                    task_total = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, token_total, 0.0)))(jnp.arange(5))
+                    task_loss_sum = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, combined_loss, 0.0)))(jnp.arange(5))
+                    task_weight_sum = jax.vmap(lambda i: jnp.sum(jnp.where(task_ids == i, combined_weight, 0.0)))(jnp.arange(5))
 
                 metrics = metrics + tuple(task_correct) + tuple(task_total) + tuple(task_loss_sum) + tuple(task_weight_sum)
             else:
@@ -6399,6 +6406,33 @@ def parse_eval_text_cases() -> list[dict[str, Any]]:
     return cases
 
 
+def parse_eval_image_cases() -> list[dict[str, str]]:
+    raw = (config.eval_image_cases or "").strip()
+    cases: list[dict[str, str]] = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                for idx, item in enumerate(parsed):
+                    if not isinstance(item, dict):
+                        continue
+                    image_text = str(item.get("image_text") or item.get("caption") or item.get("description") or "").strip()
+                    question = str(item.get("question") or item.get("prompt") or "Describe the image.").strip()
+                    if image_text and question:
+                        cases.append(
+                            {
+                                "name": str(item.get("name") or f"image_case_{idx:02d}"),
+                                "image_text": image_text,
+                                "question": question,
+                            }
+                        )
+        except json.JSONDecodeError:
+            pass
+    if not cases:
+        cases.append({"name": "red_mug", "image_text": "A red mug is on a desk.", "question": "What object is visible?"})
+    return cases
+
+
 def safe_filename(value: str) -> str:
     cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
     cleaned = "_".join(part for part in cleaned.split("_") if part)
@@ -6595,6 +6629,105 @@ def feed_runtime_tokens(
     if logits is None:
         raise ValueError("No runtime tokens were provided")
     return logits, memories, candidate_ids_np, position
+
+
+def generate_image_eval_sample(
+    model: PropagatorModel,
+    seed: int,
+    out_dir: Path,
+    case: dict[str, str],
+    sample_idx: int,
+    use_candidate_head: bool,
+) -> dict[str, Any]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    key = jax.random.PRNGKey(seed)
+    memories = model.initial_memories(1)
+    position = 0
+    image_text = str(case["image_text"])
+    question = str(case["question"])
+    name = str(case["name"])
+    lines = [
+        "# image recognition runtime sample",
+        f"case: {name}",
+        f"image_text: {image_text}",
+        f"question: {question}",
+        "",
+        "## user stream",
+    ]
+
+    image_ids = image_text_to_patch_token_ids(image_text)
+    prefix_ids = [
+        token_ids_session,
+        token_ids_user,
+        *_tokenize_modal_input_prefix("image"),
+        *image_ids,
+        token_ids_text_in,
+        *encode_text(question),
+    ]
+    logits, memories, candidate_ids_np, position = feed_runtime_tokens(
+        model,
+        memories,
+        prefix_ids,
+        use_candidate_head,
+        position,
+    )
+    raw = argmax_token_from_logits(logits, candidate_ids_np)
+    decision = user_mode_effective_decision(raw)
+    lines.append(f"[IMAGE]/[IMAGE_IN] + {len(image_ids)} image tokens + question -> {token_label(decision)}")
+
+    generated: list[int] = []
+    if decision == token_ids_user_end:
+        logits, memories, candidate_ids_np = step_runtime(model, token_ids_user_end, memories, use_candidate_head, position)
+        position += 1
+        raw = argmax_token_from_logits(logits, candidate_ids_np)
+        lines.append(f"[USER_END] -> {token_label(raw)}")
+        if raw == token_ids_model:
+            current_input = token_ids_model
+            logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
+            position += 1
+            lines.append("")
+            lines.append("## model stream")
+            for _ in range(config.sample_gen_len):
+                key, subkey = jax.random.split(key)
+                next_token = sample_model_token_from_logits(logits, subkey, candidate_ids_np, use_candidate_head)
+                generated.append(next_token)
+                lines.append(f"{token_label(current_input)} -> {token_label(next_token)}")
+                if next_token in {token_ids_model_end, token_ids_session_end, token_ids_listen}:
+                    break
+                current_input = next_token
+                logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
+                position += 1
+        else:
+            lines.append(f"stopped: expected [MODEL], got {token_label(raw)}")
+    else:
+        lines.append("not started because runtime policy did not receive [USER_END].")
+
+    text = decode_text_token_ids_for_eval(generated)
+    sample_path = out_dir / f"image_sample_{sample_idx:02d}_{safe_filename(name)}.txt"
+    sample_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "name": name,
+        "image_text": image_text,
+        "question": question,
+        "generated_text": text,
+        "num_image_tokens": len(image_ids),
+        "num_generated_tokens": len(generated),
+        "path": str(sample_path),
+    }
+
+
+def generate_image_eval_samples(
+    model: PropagatorModel,
+    seed: int,
+    out_dir: Path,
+    use_candidate_head: bool,
+) -> list[dict[str, Any]]:
+    metas = [
+        generate_image_eval_sample(model, seed + idx, out_dir, case, idx, use_candidate_head)
+        for idx, case in enumerate(parse_eval_image_cases())
+    ]
+    (out_dir / "image_generations.json").write_text(json.dumps(metas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return metas
 
 
 def parse_audio_eval_prompts() -> list[str]:
@@ -7198,12 +7331,15 @@ def build_chunk_task_ids(inputs_arr: np.ndarray, targets_arr: np.ndarray, stream
         main_inputs = np.asarray(inputs_arr[int(start) : int(end)])[..., 0]
         main_targets = np.asarray(targets_arr[int(start) : int(end)])[..., 0]
         has_audio_in = bool(np.any(main_inputs == token_ids_audio_in))
+        has_image_in = bool(np.any(main_inputs == token_ids_image_in))
         has_audio_out = bool(
             np.any(main_targets == token_ids_audio_out)
             or np.any(np.logical_and(main_targets >= audio_token_start, main_targets < audio_token_end))
         )
         task_id = 0
-        if has_audio_in and not has_audio_out:
+        if has_image_in:
+            task_id = 4
+        elif has_audio_in and not has_audio_out:
             task_id = 1
         elif not has_audio_in and has_audio_out:
             task_id = 2
@@ -7243,18 +7379,22 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
         asr_task_correct,
         tts_task_correct,
         duplex_task_correct,
+        image_task_correct,
         text_task_total,
         asr_task_total,
         tts_task_total,
         duplex_task_total,
+        image_task_total,
         text_task_nll,
         asr_task_nll,
         tts_task_nll,
         duplex_task_nll,
+        image_task_nll,
         text_task_weight,
         asr_task_weight,
         tts_task_weight,
         duplex_task_weight,
+        image_task_weight,
     ) = [float(x) for x in metric_sums]
 
     def ratio(num: float, den: float) -> float:
@@ -7288,10 +7428,12 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
         "asr_task_acc": ratio(asr_task_correct, asr_task_total),
         "tts_task_acc": ratio(tts_task_correct, tts_task_total),
         "duplex_task_acc": ratio(duplex_task_correct, duplex_task_total),
+        "image_task_acc": ratio(image_task_correct, image_task_total),
         "text_task_ce": ratio(text_task_nll, text_task_weight),
         "asr_task_ce": ratio(asr_task_nll, asr_task_weight),
         "tts_task_ce": ratio(tts_task_nll, tts_task_weight),
         "duplex_task_ce": ratio(duplex_task_nll, duplex_task_weight),
+        "image_task_ce": ratio(image_task_nll, image_task_weight),
         "decision_total": decision_total,
         "listen_total": listen_total,
         "user_end_total": user_end_total,
@@ -7301,6 +7443,7 @@ def validation_metric_dict(metric_sums: np.ndarray) -> dict[str, float]:
         "audio_token_total": audio_total,
         "audio_codebook_total": audio_codebook_total,
         "audio_aux_token_total": audio_aux_token_total,
+        "image_task_total": image_task_total,
     }
 
 
@@ -7351,6 +7494,7 @@ def validation_composite_score(metrics: dict[str, float]) -> dict[str, float]:
             finite_metric(metrics, "audio_main_acc"),
         ]
     )
+    image_score = mean_score([finite_metric(metrics, "image_task_acc")])
     audio_aux_score = mean_score([finite_metric(metrics, "audio_aux_token_acc")])
     duplex_score = finite_metric(metrics, "duplex_task_acc", 0.0) or 0.0
 
@@ -7362,22 +7506,25 @@ def validation_composite_score(metrics: dict[str, float]) -> dict[str, float]:
         finite_metric(metrics, "text_token_total", 0.0) or 0.0,
         finite_metric(metrics, "audio_token_total", 0.0) or 0.0,
         finite_metric(metrics, "audio_aux_token_total", 0.0) or 0.0,
+        finite_metric(metrics, "image_task_total", 0.0) or 0.0,
     ]
     coverage_score = float(np.mean([1.0 if value > 0.0 else 0.0 for value in coverage_checks]))
 
     composite = (
-        0.25 * protocol_score
-        + 0.25 * text_score
-        + 0.20 * speech_score
+        0.22 * protocol_score
+        + 0.22 * text_score
+        + 0.18 * speech_score
+        + 0.10 * image_score
         + 0.10 * audio_aux_score
         + 0.10 * duplex_score
-        + 0.10 * coverage_score
+        + 0.08 * coverage_score
     )
     return {
         "validation_composite_score": float(composite),
         "validation_protocol_score": float(protocol_score),
         "validation_text_score": float(text_score),
         "validation_speech_score": float(speech_score),
+        "validation_image_score": float(image_score),
         "validation_audio_aux_score": float(audio_aux_score),
         "validation_duplex_score": float(duplex_score),
         "validation_coverage_score": float(coverage_score),
@@ -7412,7 +7559,7 @@ def run_validation(
             reset_mask = maybe_put_vector(reset_mask_np, np.bool_)
             chunk_positions = get_chunk_positions_by_indices(val_chunk_positions, indices)
 
-            # Task ids: 0 Text->Text, 1 Audio->Text, 2 Text->Audio, 3 Audio->Audio/Hybrid.
+            # Task ids: 0 Text->Text, 1 Audio->Text, 2 Text->Audio, 3 Audio->Audio/Hybrid, 4 Image->Text.
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
             task_ids = maybe_put_vector(task_ids_np, np.int32)
 
@@ -8237,6 +8384,8 @@ def main() -> None:
     val_asr_task_accs: list[float] = []
     val_tts_task_accs: list[float] = []
     val_duplex_task_accs: list[float] = []
+    val_image_task_accs: list[float] = []
+    val_image_task_ces: list[float] = []
     val_composite_scores: list[float] = []
     best_early_stop_score = float("-inf")
     evals_without_improvement = 0
@@ -8292,6 +8441,8 @@ def main() -> None:
                             val_asr_task_accs.append(m.get("asr_task_acc", 0.0))
                             val_tts_task_accs.append(m.get("tts_task_acc", 0.0))
                             val_duplex_task_accs.append(m.get("duplex_task_acc", 0.0))
+                            val_image_task_accs.append(m.get("image_task_acc", 0.0))
+                            val_image_task_ces.append(m.get("image_task_ce", float("nan")))
                             composite_record = validation_composite_score(m)
                             val_composite_scores.append(
                                 float(m.get("validation_composite_score", composite_record["validation_composite_score"]))
@@ -8475,6 +8626,8 @@ def main() -> None:
             val_asr_task_accs.append(v_metrics.get("asr_task_acc", float("nan")))
             val_tts_task_accs.append(v_metrics.get("tts_task_acc", float("nan")))
             val_duplex_task_accs.append(v_metrics.get("duplex_task_acc", float("nan")))
+            val_image_task_accs.append(v_metrics.get("image_task_acc", float("nan")))
+            val_image_task_ces.append(v_metrics.get("image_task_ce", float("nan")))
             val_composite_scores.append(v_score)
 
             out_dir = output_root / f"step_{act_step}"
@@ -8521,6 +8674,8 @@ def main() -> None:
             save_metric_plot(val_steps, val_asr_task_accs, out_dir / "val_asr_task_acc.png", "Validation ASR Task Accuracy", act_step)
             save_metric_plot(val_steps, val_tts_task_accs, out_dir / "val_tts_task_acc.png", "Validation TTS Task Accuracy", act_step)
             save_metric_plot(val_steps, val_duplex_task_accs, out_dir / "val_duplex_task_acc.png", "Validation Duplex Task Accuracy", act_step)
+            save_metric_plot(val_steps, val_image_task_accs, out_dir / "val_image_task_acc.png", "Validation Image Task Accuracy", act_step)
+            save_metric_plot(val_steps, val_image_task_ces, out_dir / "val_image_task_ce.png", "Validation Image Task CE", act_step)
             save_metric_plot(
                 val_steps,
                 val_composite_scores,
@@ -8532,6 +8687,12 @@ def main() -> None:
             text_meta = generate_text_eval_samples(
                 model,
                 config.seed + 30_000,
+                out_dir,
+                use_candidate_head=config.eval_use_candidate_head,
+            )
+            image_meta = generate_image_eval_samples(
+                model,
+                config.seed + 40_000,
                 out_dir,
                 use_candidate_head=config.eval_use_candidate_head,
             )
@@ -8553,6 +8714,7 @@ def main() -> None:
                     "val_loss": v_loss,
                     "metrics": v_metrics,
                     "text_eval": text_meta,
+                    "image_eval": image_meta,
                     "audio_eval": audio_meta,
                     "audio_input_eval": audio_input_meta,
                     "time": time.time(),
@@ -8579,6 +8741,7 @@ def main() -> None:
                 }
                 log_info(f"[Audio Input Eval] {json.dumps(input_summary, ensure_ascii=False)}")
             log_info(f"[Sample] wrote {len(text_meta)} text samples to {out_dir}")
+            log_info(f"[Image Eval] wrote {len(image_meta)} image samples to {out_dir}")
 
         if act_step % config.checkpoint_every == 0 or act_step == total_steps or should_early_stop:
             ckpt_dir = output_root / f"step_{act_step}"
