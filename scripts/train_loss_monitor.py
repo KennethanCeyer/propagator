@@ -79,22 +79,35 @@ def write_plot(records: dict[int, dict]) -> None:
         return
     fill = float(np.nanmean(values[finite]))
     values = np.where(finite, values, fill)
-    plt.figure(figsize=(10, 4))
-    plt.plot(steps, values, alpha=0.35, label="raw")
-    if len(values) > 1:
-        window = min(len(values), max(5, len(values) // 20))
-        kernel = np.ones(window, dtype=np.float32) / float(window)
-        smooth = np.convolve(values, kernel, mode="same")
-        plt.plot(steps, smooth, linewidth=2, label=f"rolling mean ({window})")
-    plt.title(f"Train weighted CE - Step {steps[-1]}")
-    plt.xlabel("step")
-    plt.ylabel("Train weighted CE")
-    plt.grid(True, alpha=0.2)
-    plt.legend(loc="best")
-    plt.tight_layout()
-    PLOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(PLOT_PATH, dpi=120)
-    plt.close()
+    with plt.rc_context(
+        {
+            "font.family": "monospace",
+            "font.monospace": ["Roboto Mono", "DejaVu Sans Mono", "Liberation Mono", "monospace"],
+            "axes.edgecolor": "black",
+            "axes.labelcolor": "black",
+            "text.color": "black",
+            "xtick.color": "black",
+            "ytick.color": "black",
+        }
+    ):
+        plt.figure(figsize=(10, 4), facecolor="white")
+        ax = plt.gca()
+        ax.set_facecolor("white")
+        plt.plot(steps, values, color="silver", linewidth=2, alpha=0.95, label="raw")
+        if len(values) > 1:
+            window = min(len(values), max(5, len(values) // 20))
+            kernel = np.ones(window, dtype=np.float32) / float(window)
+            smooth = np.convolve(values, kernel, mode="same")
+            plt.plot(steps, smooth, color="black", linewidth=2, label=f"rolling mean ({window})")
+        plt.title(f"Train weighted CE - Step {steps[-1]}")
+        plt.xlabel("step")
+        plt.ylabel("Train weighted CE")
+        plt.grid(True, color="silver", alpha=0.35, linewidth=0.8)
+        plt.legend(loc="best", frameon=False)
+        plt.tight_layout()
+        PLOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(PLOT_PATH, dpi=120, facecolor="white")
+        plt.close()
 
 
 def sync_once() -> int:

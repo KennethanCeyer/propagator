@@ -7657,27 +7657,40 @@ def save_metric_plot(steps: list[int], values: list[float], path: Path, title: s
     if len(steps) != len(values):
         start = max(1, step - len(values) + 1)
         steps = list(range(start, start + len(values)))
-    plt.figure(figsize=(10, 4))
-    v_arr = np.asarray(values, dtype=np.float32)
-    finite = np.isfinite(v_arr)
-    if not np.any(finite):
-        v_arr = np.zeros_like(v_arr)
-    else:
-        fill_value = float(np.nanmean(v_arr[finite]))
-        v_arr = np.where(finite, v_arr, fill_value)
-    plt.plot(steps, v_arr, alpha=0.3, label="raw")
-    if len(v_arr) > 1:
-        window = max(5, len(v_arr) // 20)
-        plt.plot(steps, rolling_mean(v_arr, window), linewidth=2, label=f"rolling mean ({window})")
-    plt.title(f"{title} - Step {step}")
-    plt.xlabel("step")
-    plt.ylabel(title)
-    plt.legend(loc="best")
-    plt.grid(True, alpha=0.2)
-    plt.tight_layout()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(path, dpi=120)
-    plt.close()
+    with plt.rc_context(
+        {
+            "font.family": "monospace",
+            "font.monospace": ["Roboto Mono", "DejaVu Sans Mono", "Liberation Mono", "monospace"],
+            "axes.edgecolor": "black",
+            "axes.labelcolor": "black",
+            "text.color": "black",
+            "xtick.color": "black",
+            "ytick.color": "black",
+        }
+    ):
+        plt.figure(figsize=(10, 4), facecolor="white")
+        ax = plt.gca()
+        ax.set_facecolor("white")
+        v_arr = np.asarray(values, dtype=np.float32)
+        finite = np.isfinite(v_arr)
+        if not np.any(finite):
+            v_arr = np.zeros_like(v_arr)
+        else:
+            fill_value = float(np.nanmean(v_arr[finite]))
+            v_arr = np.where(finite, v_arr, fill_value)
+        plt.plot(steps, v_arr, color="silver", linewidth=2, alpha=0.95, label="raw")
+        if len(v_arr) > 1:
+            window = min(len(v_arr), max(5, len(v_arr) // 20))
+            plt.plot(steps, rolling_mean(v_arr, window), color="black", linewidth=2, label=f"rolling mean ({window})")
+        plt.title(f"{title} - Step {step}")
+        plt.xlabel("step")
+        plt.ylabel(title)
+        plt.legend(loc="best", frameon=False)
+        plt.grid(True, color="silver", alpha=0.35, linewidth=0.8)
+        plt.tight_layout()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path, dpi=120, facecolor="white")
+        plt.close()
 
 
 def shuffle_data_for_epoch(epoch: int) -> np.ndarray:
