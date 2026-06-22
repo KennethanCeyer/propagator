@@ -7,6 +7,32 @@ from huggingface_hub import HfApi
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATASET_REPO_NAME = "propagator-multimodal-pretraining-data"
 TOKENIZER_REPO_NAME = "propagator-tokenizer"
+GITHUB_REPO_URL = "https://github.com/KennethanCeyer/propagator"
+
+SPECIAL_TOKEN_TABLE = """| Token id | Token | Purpose |
+| ---: | --- | --- |
+| 0 | `[PAD]` | Padding token |
+| 1 | `[UNK]` | Unknown token |
+| 2 | `[SESSION]` | Conversation/session start marker |
+| 3 | `[USER]` | User turn marker |
+| 4 | `[MODEL]` | Model turn marker |
+| 5 | `[LISTEN]` | Listening/continuation marker |
+| 6 | `[USER_END]` | User turn boundary |
+| 7 | `[MODEL_END]` | Model turn boundary |
+| 8 | `[SESSION_END]` | Conversation/session boundary |
+| 9 | `[USER_INTERRUPT]` | User interruption marker |
+| 10 | `[AUDIO_IN]` | Audio input span marker |
+| 11 | `[AUDIO_OUT]` | Audio output span marker |
+| 12 | `[AUDIO_END]` | Audio span boundary |
+| 13 | `[SILENCE]` | Silence marker |
+| 14 | `[TEXT_IN]` | Text input span marker |
+| 15 | `[TEXT_OUT]` | Text output span marker |
+| 16000 | `[HYBRID_OUT]` | Mixed-modality output marker |
+| 16001 | `[IMAGE_IN]` | Image input span marker |
+| 16002 | `[TEXT]` | Text modality marker |
+| 16003 | `[AUDIO]` | Audio modality marker |
+| 16004 | `[IMAGE]` | Image modality marker |
+| 16005 | `[HYBRID]` | Mixed-modality marker |"""
 
 load_dotenv(PROJECT_ROOT / ".env")
 token = os.environ.get('HF_TOKEN')
@@ -35,6 +61,11 @@ This repository contains the tokenizer used with the [Propagator Multimodal Pret
 
 The tokenizer is a byte-level BPE text tokenizer with a small set of special tokens for conversation boundaries and modality markers. It is intended for projects that need the same text and marker vocabulary used by the Propagator multimodal dataset.
 
+## Source Code
+
+*   GitHub: [{GITHUB_REPO_URL}]({GITHUB_REPO_URL})
+*   Related dataset: [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{username}/{DATASET_REPO_NAME})
+
 ## Files
 
 *   `tokenizer.json`: Hugging Face `tokenizers` JSON file.
@@ -42,8 +73,25 @@ The tokenizer is a byte-level BPE text tokenizer with a small set of special tok
 ## Token Space
 
 *   Base text BPE vocabulary: 16,000 tokens.
-*   Special tokens include `[SESSION]`, `[USER]`, `[MODEL]`, `[TEXT_IN]`, `[TEXT_OUT]`, `[IMAGE_IN]`, `[AUDIO_IN]`, `[AUDIO_OUT]`, `[AUDIO_END]`, `[HYBRID_OUT]`, and related boundary markers.
 *   This repository only contains the text tokenizer. Multimodal numeric ids used by the paired dataset are documented in the dataset card.
+
+## Special Tokens
+
+{SPECIAL_TOKEN_TABLE}
+
+## Quick Start
+
+```python
+from huggingface_hub import hf_hub_download
+from tokenizers import Tokenizer
+
+repo_id = "{username}/{TOKENIZER_REPO_NAME}"
+tokenizer_path = hf_hub_download(repo_id, "tokenizer.json")
+tokenizer = Tokenizer.from_file(tokenizer_path)
+
+encoded = tokenizer.encode("[SESSION] [USER] [TEXT_IN] Describe the image. [USER_END]")
+print(encoded.ids)
+```
 
 ## Related Dataset
 
@@ -53,7 +101,7 @@ Use the dataset card for source coverage, binary frame layout, and reconstructio
 """
 
 # README for propagator-multimodal-pretraining-data
-dataset_readme = """---
+dataset_readme = f"""---
 license: other
 pretty_name: Propagator Multimodal Pretraining Data
 language:
@@ -83,6 +131,11 @@ configs:
 This public dataset contains tokenized multimodal pretraining data prepared for the **Propagator** model family. It combines language, image-grounded, and speech/audio-token examples into a single training format.
 
 This is not a raw text or image browsing dataset. The examples have already been converted into compact binary token frames for model training, with a manifest that records the source groups and file layout.
+
+## Source Code
+
+*   GitHub: [{GITHUB_REPO_URL}]({GITHUB_REPO_URL})
+*   Tokenizer: [Propagator Tokenizer](https://huggingface.co/{username}/{TOKENIZER_REPO_NAME})
 
 ## What's Included
 
@@ -126,6 +179,23 @@ Large files are split under `shards/<cache_group>/` as `<original-file>.part-000
 *   `*.stream_id.bin`: Sequence identifiers mapping chunks to source database streams.
 *   `*.chunk_pos.bin`: Order position of the chunk in the sequence.
 *   `*.meta.json`: Metadata detailing the count of chunks, unroll length, source row counts, vocabulary properties, and token stats.
+
+## Loading
+
+```python
+import json
+from huggingface_hub import hf_hub_download
+
+manifest_path = hf_hub_download(
+    repo_id="{username}/{DATASET_REPO_NAME}",
+    filename="propagator_cache_manifest.json",
+    repo_type="dataset",
+)
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+
+first_binary = next(item for item in manifest["files"] if item["path"].endswith(".input.bin"))
+print(first_binary["repo_paths"][:3])
+```
 
 ## License and Source Terms
 

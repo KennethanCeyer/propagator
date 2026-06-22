@@ -24,6 +24,7 @@ DELETE_UNSHARDED_REMOTE = os.environ.get("HF_DELETE_UNSHARDED_REMOTE", "1").lowe
 SKIP_EXISTING = os.environ.get("HF_UPLOAD_SKIP_EXISTING", "1").lower() not in {"0", "false", "no", "off"}
 DEFAULT_DATASET_REPO_NAME = "propagator-multimodal-pretraining-data"
 TOKENIZER_REPO_NAME = "propagator-tokenizer"
+GITHUB_REPO_URL = "https://github.com/KennethanCeyer/propagator"
 
 DATA_SUFFIXES = (
     ".input.bin",
@@ -162,6 +163,32 @@ SOURCE_DESCRIPTIONS = {
 }
 
 
+SPECIAL_TOKEN_TABLE = """| Token id | Token | Purpose |
+| ---: | --- | --- |
+| 0 | `[PAD]` | Padding token |
+| 1 | `[UNK]` | Unknown token |
+| 2 | `[SESSION]` | Conversation/session start marker |
+| 3 | `[USER]` | User turn marker |
+| 4 | `[MODEL]` | Model turn marker |
+| 5 | `[LISTEN]` | Listening/continuation marker |
+| 6 | `[USER_END]` | User turn boundary |
+| 7 | `[MODEL_END]` | Model turn boundary |
+| 8 | `[SESSION_END]` | Conversation/session boundary |
+| 9 | `[USER_INTERRUPT]` | User interruption marker |
+| 10 | `[AUDIO_IN]` | Audio input span marker |
+| 11 | `[AUDIO_OUT]` | Audio output span marker |
+| 12 | `[AUDIO_END]` | Audio span boundary |
+| 13 | `[SILENCE]` | Silence marker |
+| 14 | `[TEXT_IN]` | Text input span marker |
+| 15 | `[TEXT_OUT]` | Text output span marker |
+| 16000 | `[HYBRID_OUT]` | Mixed-modality output marker |
+| 16001 | `[IMAGE_IN]` | Image input span marker |
+| 16002 | `[TEXT]` | Text modality marker |
+| 16003 | `[AUDIO]` | Audio modality marker |
+| 16004 | `[IMAGE]` | Image modality marker |
+| 16005 | `[HYBRID]` | Mixed-modality marker |"""
+
+
 def hf_dataset_link(name: str) -> str:
     if name == "json":
         return "Local prepared rows"
@@ -230,6 +257,11 @@ This repository contains the tokenizer used with the [Propagator Multimodal Pret
 
 The tokenizer is a byte-level BPE text tokenizer with a small set of special tokens for conversation boundaries and modality markers. It is intended for projects that need the same text and marker vocabulary used by the Propagator multimodal dataset.
 
+## Source Code
+
+- GitHub: [{GITHUB_REPO_URL}]({GITHUB_REPO_URL})
+- Related dataset: [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{dataset_repo})
+
 ## Files
 
 - `tokenizer.json`: Hugging Face `tokenizers` JSON file.
@@ -237,8 +269,25 @@ The tokenizer is a byte-level BPE text tokenizer with a small set of special tok
 ## Token Space
 
 - Base text BPE vocabulary: 16,000 tokens.
-- Special tokens include `[SESSION]`, `[USER]`, `[MODEL]`, `[TEXT_IN]`, `[TEXT_OUT]`, `[IMAGE_IN]`, `[AUDIO_IN]`, `[AUDIO_OUT]`, `[AUDIO_END]`, `[HYBRID_OUT]`, and related boundary markers.
 - This repository only contains the text tokenizer. Multimodal numeric ids used by the paired dataset are documented in the dataset card.
+
+## Special Tokens
+
+{SPECIAL_TOKEN_TABLE}
+
+## Quick Start
+
+```python
+from huggingface_hub import hf_hub_download
+from tokenizers import Tokenizer
+
+repo_id = "{tokenizer_repo}"
+tokenizer_path = hf_hub_download(repo_id, "tokenizer.json")
+tokenizer = Tokenizer.from_file(tokenizer_path)
+
+encoded = tokenizer.encode("[SESSION] [USER] [TEXT_IN] Describe the image. [USER_END]")
+print(encoded.ids)
+```
 
 ## Related Dataset
 
@@ -248,7 +297,7 @@ Use the dataset card for source coverage, binary frame layout, and reconstructio
 """
 
 
-def dataset_readme(manifest: dict[str, Any], tokenizer_repo: str) -> str:
+def dataset_readme(manifest: dict[str, Any], tokenizer_repo: str, dataset_repo: str) -> str:
     tib = manifest["total_bytes"] / 1024**4
     shard_gib = manifest["shard_bytes"] / 1024**3
     visibility = "public" if PUBLIC_DATASET else "private"
@@ -283,6 +332,11 @@ configs:
 This {visibility} dataset contains tokenized multimodal pretraining data prepared for the Propagator model family. It combines language, image-grounded, and speech/audio-token examples into a single training format.
 
 This is not a raw text or image browsing dataset. The examples have already been converted into compact binary token frames for model training, with a manifest that records the source groups and file layout.
+
+## Source Code
+
+- GitHub: [{GITHUB_REPO_URL}]({GITHUB_REPO_URL})
+- Tokenizer: [Propagator Tokenizer](https://huggingface.co/{tokenizer_repo})
 
 ## What's Included
 
@@ -328,6 +382,21 @@ The first lane carries the main text/control stream. Additional lanes carry moda
 ## Loading
 
 For each file, read `propagator_cache_manifest.json` and concatenate the listed `repo_paths` in order, or stream those parts directly if your loader supports sharded reads. Validate the final byte count against the manifest before memory-mapping.
+
+```python
+import json
+from huggingface_hub import hf_hub_download
+
+manifest_path = hf_hub_download(
+    repo_id="{dataset_repo}",
+    filename="propagator_cache_manifest.json",
+    repo_type="dataset",
+)
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+
+first_binary = next(item for item in manifest["files"] if item["path"].endswith(".input.bin"))
+print(first_binary["repo_paths"][:3])
+```
 
 ## License and Source Terms
 
@@ -518,7 +587,7 @@ def main() -> None:
         dataset_repo,
         "dataset",
         "README.md",
-        dataset_readme(manifest, tokenizer_repo),
+        dataset_readme(manifest, tokenizer_repo, dataset_repo),
         "Update sharded dataset README",
     )
     upload_text(
