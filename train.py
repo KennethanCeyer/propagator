@@ -8227,6 +8227,30 @@ def append_metrics_jsonl(output_root: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def append_train_metrics_jsonl(output_root: Path, record: dict[str, Any]) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    with open(output_root / "train_metrics.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_train_loss_history(output_root: Path, max_step: int) -> tuple[list[int], list[float]]:
+    by_step: dict[int, float] = {}
+    for metrics_path in (output_root / "metrics.jsonl", output_root / "train_metrics.jsonl"):
+        if not metrics_path.exists():
+            continue
+        with open(metrics_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                    s = int(record.get("step", 0))
+                    if 0 < s <= max_step and "train_loss" in record:
+                        by_step[s] = float(record["train_loss"])
+                except Exception:
+                    continue
+    steps = sorted(by_step)
+    return steps, [by_step[s] for s in steps]
+
+
 def init_global_token_ids() -> None:
     global token_ids_pad, token_ids_unk, token_ids_session, token_ids_user, token_ids_model
     global token_ids_listen, token_ids_user_end, token_ids_model_end, token_ids_session_end, token_ids_user_interrupt
@@ -8404,9 +8428,9 @@ def main() -> None:
                     start_step = step
 
                     # Try to recover training metrics history.
+                    train_loss_steps[:], train_losses[:] = load_train_loss_history(output_root, start_step)
                     metrics_path = output_root / "metrics.jsonl"
                     if metrics_path.exists():
-                        train_by_step: dict[int, float] = {}
                         val_by_step: dict[int, tuple[float, dict[str, float]]] = {}
                         with open(metrics_path, "r", encoding="utf-8") as f:
                             for line in f:
@@ -8414,14 +8438,10 @@ def main() -> None:
                                     record = json.loads(line)
                                     s = int(record.get("step", 0))
                                     if s <= start_step:
-                                        train_by_step[s] = float(record.get("train_loss", 0.0))
                                         if "val_loss" in record:
                                             val_by_step[s] = (float(record["val_loss"]), record.get("metrics", {}))
                                 except Exception:
                                     continue
-                        for s in sorted(train_by_step):
-                            train_loss_steps.append(s)
-                            train_losses.append(train_by_step[s])
                         for s in sorted(val_by_step):
                             v_loss, m = val_by_step[s]
                             val_steps.append(s)
@@ -8575,6 +8595,19 @@ def main() -> None:
                 f"steps_per_sec={avg_sps:.4f}, interval_steps_per_sec={interval_sps:.4f}, "
                 f"elapsed={format_duration(elapsed)}, eta={format_duration(eta_seconds)}"
             )
+            append_train_metrics_jsonl(
+                output_root,
+                {
+                    "step": act_step,
+                    "train_loss": latest_train_loss,
+                    "steps_per_sec": avg_sps,
+                    "interval_steps_per_sec": interval_sps,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": eta_seconds,
+                    "time": time.time(),
+                },
+            )
+            save_metric_plot(train_loss_steps, train_losses, output_root / "train_loss.png", "Train weighted CE", act_step)
             last_train_log_time = now
             last_train_log_step = act_step
 
