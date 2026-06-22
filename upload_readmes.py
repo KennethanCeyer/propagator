@@ -33,7 +33,7 @@ tags:
 
 This repository contains the tokenizer used with the [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{username}/{DATASET_REPO_NAME}).
 
-The tokenizer is a byte-level BPE text tokenizer with Propagator protocol tokens for turn boundaries and modality markers. It is intended to be used together with the packed dataset frame format, where text tokens, image patch tokens, and audio code tokens are stored in aligned training frames.
+The tokenizer is a byte-level BPE text tokenizer with a small set of special tokens for conversation boundaries and modality markers. It is intended for projects that need the same text and marker vocabulary used by the Propagator multimodal dataset.
 
 ## Files
 
@@ -42,8 +42,8 @@ The tokenizer is a byte-level BPE text tokenizer with Propagator protocol tokens
 ## Token Space
 
 *   Base text BPE vocabulary: 16,000 tokens.
-*   Protocol and modality marker tokens include `[SESSION]`, `[USER]`, `[MODEL]`, `[TEXT_IN]`, `[TEXT_OUT]`, `[IMAGE_IN]`, `[AUDIO_IN]`, `[AUDIO_OUT]`, `[AUDIO_END]`, `[HYBRID_OUT]`, and related boundary/control markers.
-*   The multimodal dataset uses this tokenizer for text and control tokens. Image patch ids and audio code ids are assigned by the Propagator preprocessing pipeline and documented through the dataset format and manifest.
+*   Special tokens include `[SESSION]`, `[USER]`, `[MODEL]`, `[TEXT_IN]`, `[TEXT_OUT]`, `[IMAGE_IN]`, `[AUDIO_IN]`, `[AUDIO_OUT]`, `[AUDIO_END]`, `[HYBRID_OUT]`, and related boundary markers.
+*   This repository only contains the text tokenizer. Multimodal numeric ids used by the paired dataset are documented in the dataset card.
 
 ## Related Dataset
 
@@ -108,7 +108,7 @@ This is not a raw text or image browsing dataset. The examples have already been
 
 ## Tokenizer
 
-This package is encoded with the [Propagator Tokenizer](https://huggingface.co/{username}/{TOKENIZER_REPO_NAME}). The tokenizer repository contains the Hugging Face `tokenizers` JSON file used for text and protocol tokens. The packed dataset also includes model-side image patch ids and audio code ids in additional frame lanes.
+Text and marker tokens in this package use the [Propagator Tokenizer](https://huggingface.co/{username}/{TOKENIZER_REPO_NAME}). The tokenizer repository contains the Hugging Face `tokenizers` JSON file; non-text modality ids are described in this dataset card.
 
 ## Intended Use
 
