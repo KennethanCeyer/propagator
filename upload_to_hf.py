@@ -312,7 +312,7 @@ Large binary cache files are split under `shards/<cache_group>/` as:
 
 `<original-file>.part-00000-of-NNNNN`
 
-The split layout keeps each object at about `{shard_gib:.0f} GiB`, which is friendlier for resumable upload/download and parallel reads. The manifest records the exact reconstruction order and original byte sizes.
+The prepared package is about `{tib:.2f} TiB` total. The split layout keeps each object at about `{shard_gib:.0f} GiB`, which is friendlier for resumable upload/download and parallel reads. The manifest records reconstruction order and byte sizes for loaders that need to rebuild full binary files.
 
 Each prepared data group contains the same file family:
 
@@ -328,14 +328,6 @@ The first lane carries the main text/control stream. Additional lanes carry moda
 ## Loading
 
 For each file, read `propagator_cache_manifest.json` and concatenate the listed `repo_paths` in order, or stream those parts directly if your loader supports sharded reads. Validate the final byte count against the manifest before memory-mapping.
-
-## Current Package
-
-- Total prepared data: `{tib:.2f} TiB`
-- Prepared data groups: `{manifest["group_count"]}`
-- Original cache files: `{manifest["source_file_count"]}`
-- Repository objects after splitting: `{manifest["repo_file_count"]}`
-- Manifest: `propagator_cache_manifest.json`
 
 ## License and Source Terms
 
