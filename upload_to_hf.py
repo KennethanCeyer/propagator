@@ -22,6 +22,7 @@ COPY_BUFFER_BYTES = int(os.environ.get("HF_UPLOAD_COPY_BUFFER_BYTES", str(64 * 1
 PUBLIC_DATASET = os.environ.get("HF_DATASET_PUBLIC", "1").lower() not in {"0", "false", "no", "off"}
 DELETE_UNSHARDED_REMOTE = os.environ.get("HF_DELETE_UNSHARDED_REMOTE", "1").lower() not in {"0", "false", "no", "off"}
 SKIP_EXISTING = os.environ.get("HF_UPLOAD_SKIP_EXISTING", "1").lower() not in {"0", "false", "no", "off"}
+DEFAULT_DATASET_REPO_NAME = "propagator-multimodal-pretraining-shards"
 
 DATA_SUFFIXES = (
     ".input.bin",
@@ -147,9 +148,41 @@ def build_manifest(groups: list[dict[str, Any]]) -> dict[str, Any]:
 
 def dataset_readme(manifest: dict[str, Any]) -> str:
     gib = manifest["total_bytes"] / 1024**3
+    tib = manifest["total_bytes"] / 1024**4
     shard_gib = manifest["shard_bytes"] / 1024**3
     visibility = "public" if PUBLIC_DATASET else "private"
+    modes = sorted({str(group.get("dataset_mode")) for group in manifest["groups"] if group.get("dataset_mode")})
+    mode_text = ", ".join(f"`{mode}`" for mode in modes) if modes else "recorded in the manifest"
+    sources = sorted(
+        {
+            str(group.get("dataset_name"))
+            for group in manifest["groups"]
+            if group.get("dataset_name") and group.get("dataset_name") != "json"
+        }
+    )
+    source_lines = "\n".join(f"- `{source}`" for source in sources[:16])
+    if len(sources) > 16:
+        source_lines += f"\n- ...and {len(sources) - 16} additional source entries in the manifest"
+    if not source_lines:
+        source_lines = "- See `propagator_cache_manifest.json` for source details."
     return f"""---
+license: other
+pretty_name: Propagator Multimodal Pretraining Shards
+language:
+- en
+tags:
+- multimodal
+- pretraining
+- tokenized
+- sharded
+- text
+- image
+- speech
+task_categories:
+- text-generation
+- question-answering
+- image-to-text
+- automatic-speech-recognition
 configs:
 - config_name: sharded
   data_files:
@@ -157,9 +190,15 @@ configs:
   - "shards/**/*.json"
 ---
 
-# Propagator Preprocessed Multimodal Cache
+# Propagator Multimodal Pretraining Shards
 
-This {visibility} dataset contains completed preprocessed cache groups for Propagator training.
+This {visibility} repository contains the sharded, tokenized multimodal pretraining cache used by the Propagator model family. It is designed for model training and reproducibility, not for direct human reading: the rows are already packed into binary token frames with metadata describing their source groups.
+
+The cache mixes text, image-grounded, and speech/audio-token workloads so a reader can train on:
+
+- text generation, instruction following, dialogue, and long-context plain text;
+- image recognition and image-plus-prompt answer generation through image patch tokens;
+- speech/text examples encoded as Mimi-style audio code tokens for ASR, TTS, and duplex audio-text behavior.
 
 ## Contents
 
@@ -167,15 +206,41 @@ This {visibility} dataset contains completed preprocessed cache groups for Propa
 - Cache groups: `{manifest["group_count"]}`
 - Source files: `{manifest["source_file_count"]}`
 - Repo files: `{manifest["repo_file_count"]}`
-- Total source size: `{gib:.2f} GiB`
+- Total source size: `{gib:.2f} GiB` (`{tib:.2f} TiB`)
 - Target shard size: `{shard_gib:.2f} GiB`
 - Manifest: `propagator_cache_manifest.json`
+- Dataset modes: {mode_text}
 
 Large binary cache files are split under `shards/<cache_group>/` as:
 
 `<original-file>.part-00000-of-NNNNN`
 
 Small files are stored un-split in the same group folder. The manifest records the exact reconstruction order and original byte sizes. The shard size is aligned to binary record sizes used by the Propagator caches, so readers can stream parts in parallel without relying on giant single-object downloads.
+
+## Binary Format
+
+Each cache group contains the same file family:
+
+- `*.input.bin`: int32 token frames with shape `[num_chunks, unroll_length, 8]`.
+- `*.target.bin`: int32 next-token target frames with shape `[num_chunks, unroll_length, 8]`.
+- `*.weight.bin`: float32 loss weights with shape `[num_chunks, unroll_length]`.
+- `*.stream_id.bin`: int64 stream identifiers for sequence boundaries.
+- `*.chunk_pos.bin`: int32 chunk positions within each stream.
+- `*.meta.json`: source rows, chunk counts, unroll length, frame width, and preprocessing metadata.
+
+The first lane carries the main text/control stream. Additional lanes carry modality-specific codebooks, including image patch tokens and audio code tokens where applicable.
+
+## Source Coverage
+
+The manifest includes per-cache source names, split metadata, row counts, and preprocessing modes. Current upstream sources include:
+
+{source_lines}
+
+Local JSON groups contain Propagator identity, seed instruction, and image-recognition examples prepared for the same frame format. Source licenses and usage terms follow the upstream datasets listed in the manifest.
+
+## Loading Notes
+
+For a sharded file, concatenate the `repo_paths` listed in `propagator_cache_manifest.json` in order to reconstruct the original binary file, or stream the parts directly when the training loader supports sharded reads. Validate the reconstructed byte size against the `bytes` field before memory-mapping.
 """
 
 
@@ -312,7 +377,10 @@ def main() -> None:
         sys.exit(1)
 
     tokenizer_repo = f"{username}/propagator-tokenizer"
-    dataset_repo = f"{username}/propagator-preprocessed"
+    dataset_repo = os.environ.get(
+        "HF_DATASET_REPO",
+        f"{username}/{os.environ.get('HF_DATASET_REPO_NAME', DEFAULT_DATASET_REPO_NAME)}",
+    )
     print(f"Authenticated as {username}", flush=True)
     print(f"Tokenizer repo: {tokenizer_repo}", flush=True)
     print(f"Dataset repo: {dataset_repo}", flush=True)
