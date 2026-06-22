@@ -163,6 +163,75 @@ This is not a raw text or image browsing dataset. The examples have already been
 
 Text and marker tokens in this package use the [Propagator Tokenizer](https://huggingface.co/{username}/{TOKENIZER_REPO_NAME}). The tokenizer repository contains the Hugging Face `tokenizers` JSON file; non-text modality ids are described in this dataset card.
 
+## Quick Start
+
+Install the small client libraries first:
+
+```bash
+pip install huggingface_hub tokenizers numpy
+```
+
+Inspect the manifest and source groups without downloading the full dataset:
+
+```python
+import json
+from huggingface_hub import hf_hub_download
+
+repo_id = "{username}/{DATASET_REPO_NAME}"
+manifest_path = hf_hub_download(
+    repo_id=repo_id,
+    filename="propagator_cache_manifest.json",
+    repo_type="dataset",
+)
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+
+for group in manifest["groups"][:8]:
+    print(group.get("dataset_name"), group.get("dataset_mode"), group.get("source_rows"))
+```
+
+Download a small metadata file before pulling large binary shards:
+
+```python
+import json
+from huggingface_hub import hf_hub_download
+
+repo_id = "{username}/{DATASET_REPO_NAME}"
+manifest_path = hf_hub_download(repo_id, "propagator_cache_manifest.json", repo_type="dataset")
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+
+meta_file = next(item for item in manifest["files"] if item["path"].endswith(".meta.json"))
+meta_path = hf_hub_download(repo_id, meta_file["repo_paths"][0], repo_type="dataset")
+meta = json.load(open(meta_path, encoding="utf-8"))
+print(meta.keys())
+```
+
+Reconstruct a sharded binary file only after checking available disk space:
+
+```python
+import json
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+
+repo_id = "{username}/{DATASET_REPO_NAME}"
+manifest_path = hf_hub_download(repo_id, "propagator_cache_manifest.json", repo_type="dataset")
+manifest = json.load(open(manifest_path, encoding="utf-8"))
+
+entry = next(item for item in manifest["files"] if item["path"].endswith(".input.bin"))
+out_path = Path(entry["path"])
+
+with out_path.open("wb") as out:
+    for path_in_repo in entry["repo_paths"]:
+        part_path = hf_hub_download(repo_id, path_in_repo, repo_type="dataset")
+        with open(part_path, "rb") as part:
+            while True:
+                chunk = part.read(16 * 1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+assert out_path.stat().st_size == entry["bytes"]
+```
+
 ## Intended Use
 
 This repository is intended for training or reproducing Propagator-style multimodal models that consume the packed Propagator frame format. It is useful if you want a ready-to-stream pretraining corpus rather than rebuilding tokenization and modality packing from the original upstream datasets.
@@ -180,22 +249,9 @@ Large files are split under `shards/<cache_group>/` as `<original-file>.part-000
 *   `*.chunk_pos.bin`: Order position of the chunk in the sequence.
 *   `*.meta.json`: Metadata detailing the count of chunks, unroll length, source row counts, vocabulary properties, and token stats.
 
-## Loading
+## Loading Notes
 
-```python
-import json
-from huggingface_hub import hf_hub_download
-
-manifest_path = hf_hub_download(
-    repo_id="{username}/{DATASET_REPO_NAME}",
-    filename="propagator_cache_manifest.json",
-    repo_type="dataset",
-)
-manifest = json.load(open(manifest_path, encoding="utf-8"))
-
-first_binary = next(item for item in manifest["files"] if item["path"].endswith(".input.bin"))
-print(first_binary["repo_paths"][:3])
-```
+For each file, read `propagator_cache_manifest.json` and concatenate the listed `repo_paths` in order, or stream those parts directly if your loader supports sharded reads. Validate the final byte count against the manifest before memory-mapping.
 
 ## License and Source Terms
 
