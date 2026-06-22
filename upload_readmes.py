@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from huggingface_hub import HfApi
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATASET_REPO_NAME = "propagator-multimodal-pretraining-shards"
+DATASET_REPO_NAME = "propagator-multimodal-pretraining-data"
 
 load_dotenv(PROJECT_ROOT / ".env")
 token = os.environ.get('HF_TOKEN')
@@ -30,10 +30,10 @@ This repository contains the byte-level BPE tokenizer used to process text seque
 *   **Special Tokens**: Configured with custom protocol markers for session boundaries, speaker turn-taking, and multimodal alignment.
 """
 
-# README for propagator-multimodal-pretraining-shards
+# README for propagator-multimodal-pretraining-data
 dataset_readme = """---
 license: other
-pretty_name: Propagator Multimodal Pretraining Shards
+pretty_name: Propagator Multimodal Pretraining Data
 language:
 - en
 tags:
@@ -56,9 +56,9 @@ configs:
   - "shards/**/*.json"
 ---
 
-# Propagator Multimodal Pretraining Shards
+# Propagator Multimodal Pretraining Data
 
-This public dataset contains sharded, tokenized multimodal pretraining caches for the **Propagator** model family. It is a model-training artifact rather than a raw, human-readable dataset.
+This public dataset contains tokenized multimodal pretraining data for the **Propagator** model family. It is a model-training artifact rather than a raw, human-readable dataset.
 
 The cache mixes text, image-grounded, and speech/audio-token workloads:
 

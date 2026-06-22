@@ -22,7 +22,7 @@ COPY_BUFFER_BYTES = int(os.environ.get("HF_UPLOAD_COPY_BUFFER_BYTES", str(64 * 1
 PUBLIC_DATASET = os.environ.get("HF_DATASET_PUBLIC", "1").lower() not in {"0", "false", "no", "off"}
 DELETE_UNSHARDED_REMOTE = os.environ.get("HF_DELETE_UNSHARDED_REMOTE", "1").lower() not in {"0", "false", "no", "off"}
 SKIP_EXISTING = os.environ.get("HF_UPLOAD_SKIP_EXISTING", "1").lower() not in {"0", "false", "no", "off"}
-DEFAULT_DATASET_REPO_NAME = "propagator-multimodal-pretraining-shards"
+DEFAULT_DATASET_REPO_NAME = "propagator-multimodal-pretraining-data"
 
 DATA_SUFFIXES = (
     ".input.bin",
@@ -167,7 +167,7 @@ def dataset_readme(manifest: dict[str, Any]) -> str:
         source_lines = "- See `propagator_cache_manifest.json` for source details."
     return f"""---
 license: other
-pretty_name: Propagator Multimodal Pretraining Shards
+pretty_name: Propagator Multimodal Pretraining Data
 language:
 - en
 tags:
@@ -190,9 +190,9 @@ configs:
   - "shards/**/*.json"
 ---
 
-# Propagator Multimodal Pretraining Shards
+# Propagator Multimodal Pretraining Data
 
-This {visibility} repository contains the sharded, tokenized multimodal pretraining cache used by the Propagator model family. It is designed for model training and reproducibility, not for direct human reading: the rows are already packed into binary token frames with metadata describing their source groups.
+This {visibility} repository contains tokenized multimodal pretraining data for the Propagator model family. It is designed for model training and reproducibility, not for direct human reading: the rows are already packed into binary token frames with metadata describing their source groups.
 
 The cache mixes text, image-grounded, and speech/audio-token workloads so a reader can train on:
 
