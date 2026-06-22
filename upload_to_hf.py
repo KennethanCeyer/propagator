@@ -147,24 +147,9 @@ def build_manifest(groups: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def dataset_readme(manifest: dict[str, Any]) -> str:
-    gib = manifest["total_bytes"] / 1024**3
     tib = manifest["total_bytes"] / 1024**4
     shard_gib = manifest["shard_bytes"] / 1024**3
     visibility = "public" if PUBLIC_DATASET else "private"
-    modes = sorted({str(group.get("dataset_mode")) for group in manifest["groups"] if group.get("dataset_mode")})
-    mode_text = ", ".join(f"`{mode}`" for mode in modes) if modes else "recorded in the manifest"
-    sources = sorted(
-        {
-            str(group.get("dataset_name"))
-            for group in manifest["groups"]
-            if group.get("dataset_name") and group.get("dataset_name") != "json"
-        }
-    )
-    source_lines = "\n".join(f"- `{source}`" for source in sources[:16])
-    if len(sources) > 16:
-        source_lines += f"\n- ...and {len(sources) - 16} additional source entries in the manifest"
-    if not source_lines:
-        source_lines = "- See `propagator_cache_manifest.json` for source details."
     return f"""---
 license: other
 pretty_name: Propagator Multimodal Pretraining Data
@@ -192,34 +177,33 @@ configs:
 
 # Propagator Multimodal Pretraining Data
 
-This {visibility} repository contains tokenized multimodal pretraining data for the Propagator model family. It is designed for model training and reproducibility, not for direct human reading: the rows are already packed into binary token frames with metadata describing their source groups.
+This {visibility} dataset contains tokenized multimodal pretraining data prepared for the Propagator model family. It combines language, image-grounded, and speech/audio-token examples into a single training format.
 
-The cache mixes text, image-grounded, and speech/audio-token workloads so a reader can train on:
+This is not a raw text or image browsing dataset. The examples have already been converted into compact binary token frames for model training, with a manifest that records the source groups and file layout.
 
-- text generation, instruction following, dialogue, and long-context plain text;
-- image recognition and image-plus-prompt answer generation through image patch tokens;
-- speech/text examples encoded as Mimi-style audio code tokens for ASR, TTS, and duplex audio-text behavior.
+## What's Included
 
-## Contents
+- **Language:** web text, encyclopedic text, instruction-following, and dialogue data.
+- **Vision-language:** image recognition and image question-answering style examples represented as image patch tokens plus text tokens.
+- **Speech-language:** speech/text examples represented with Mimi-style audio code tokens for ASR, TTS, and duplex audio-text training.
 
-- Layout: `sharded-v1`
-- Cache groups: `{manifest["group_count"]}`
-- Source files: `{manifest["source_file_count"]}`
-- Repo files: `{manifest["repo_file_count"]}`
-- Total source size: `{gib:.2f} GiB` (`{tib:.2f} TiB`)
-- Target shard size: `{shard_gib:.2f} GiB`
-- Manifest: `propagator_cache_manifest.json`
-- Dataset modes: {mode_text}
+The upstream source families include FineWeb-Edu, Wikipedia, VQAv2, instruction/dialogue datasets, and Mimi-code speech corpora derived from public speech datasets. Exact source names, row counts, split names, and preprocessing modes are recorded in `propagator_cache_manifest.json`.
+
+## Intended Use
+
+This repository is intended for training or reproducing Propagator-style multimodal models that consume the packed Propagator frame format. It is useful if you want a ready-to-stream pretraining corpus rather than rebuilding tokenization and modality packing from the original upstream datasets.
+
+It is not intended as a general-purpose dataset viewer, example gallery, or raw media archive.
+
+## Format
 
 Large binary cache files are split under `shards/<cache_group>/` as:
 
 `<original-file>.part-00000-of-NNNNN`
 
-Small files are stored un-split in the same group folder. The manifest records the exact reconstruction order and original byte sizes. The shard size is aligned to binary record sizes used by the Propagator caches, so readers can stream parts in parallel without relying on giant single-object downloads.
+The split layout keeps each object at about `{shard_gib:.0f} GiB`, which is friendlier for resumable upload/download and parallel reads. The manifest records the exact reconstruction order and original byte sizes.
 
-## Binary Format
-
-Each cache group contains the same file family:
+Each prepared data group contains the same file family:
 
 - `*.input.bin`: int32 token frames with shape `[num_chunks, unroll_length, 8]`.
 - `*.target.bin`: int32 next-token target frames with shape `[num_chunks, unroll_length, 8]`.
@@ -230,17 +214,21 @@ Each cache group contains the same file family:
 
 The first lane carries the main text/control stream. Additional lanes carry modality-specific codebooks, including image patch tokens and audio code tokens where applicable.
 
-## Source Coverage
+## Loading
 
-The manifest includes per-cache source names, split metadata, row counts, and preprocessing modes. Current upstream sources include:
+For each file, read `propagator_cache_manifest.json` and concatenate the listed `repo_paths` in order, or stream those parts directly if your loader supports sharded reads. Validate the final byte count against the manifest before memory-mapping.
 
-{source_lines}
+## Current Package
 
-Local JSON groups contain Propagator identity, seed instruction, and image-recognition examples prepared for the same frame format. Source licenses and usage terms follow the upstream datasets listed in the manifest.
+- Total prepared data: `{tib:.2f} TiB`
+- Prepared data groups: `{manifest["group_count"]}`
+- Original cache files: `{manifest["source_file_count"]}`
+- Repository objects after splitting: `{manifest["repo_file_count"]}`
+- Manifest: `propagator_cache_manifest.json`
 
-## Loading Notes
+## License and Source Terms
 
-For a sharded file, concatenate the `repo_paths` listed in `propagator_cache_manifest.json` in order to reconstruct the original binary file, or stream the parts directly when the training loader supports sharded reads. Validate the reconstructed byte size against the `bytes` field before memory-mapping.
+This dataset is a processed training artifact assembled from multiple upstream datasets. Check the upstream dataset licenses and terms listed in the manifest before redistribution or commercial use.
 """
 
 

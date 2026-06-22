@@ -58,15 +58,25 @@ configs:
 
 # Propagator Multimodal Pretraining Data
 
-This public dataset contains tokenized multimodal pretraining data for the **Propagator** model family. It is a model-training artifact rather than a raw, human-readable dataset.
+This public dataset contains tokenized multimodal pretraining data prepared for the **Propagator** model family. It combines language, image-grounded, and speech/audio-token examples into a single training format.
 
-The cache mixes text, image-grounded, and speech/audio-token workloads:
+This is not a raw text or image browsing dataset. The examples have already been converted into compact binary token frames for model training, with a manifest that records the source groups and file layout.
 
-* text generation, instruction following, dialogue, and long-context plain text;
-* image recognition and image-plus-prompt answer generation through image patch tokens;
-* speech/text examples encoded as Mimi-style audio code tokens for ASR, TTS, and duplex audio-text behavior.
+## What's Included
 
-## Dataset Structure
+*   **Language:** web text, encyclopedic text, instruction-following, and dialogue data.
+*   **Vision-language:** image recognition and image question-answering style examples represented as image patch tokens plus text tokens.
+*   **Speech-language:** speech/text examples represented with Mimi-style audio code tokens for ASR, TTS, and duplex audio-text training.
+
+The upstream source families include FineWeb-Edu, Wikipedia, VQAv2, instruction/dialogue datasets, and Mimi-code speech corpora derived from public speech datasets. Exact source names, row counts, split names, and preprocessing modes are recorded in `propagator_cache_manifest.json`.
+
+## Intended Use
+
+This repository is intended for training or reproducing Propagator-style multimodal models that consume the packed Propagator frame format. It is useful if you want a ready-to-stream pretraining corpus rather than rebuilding tokenization and modality packing from the original upstream datasets.
+
+It is not intended as a general-purpose dataset viewer, example gallery, or raw media archive.
+
+## Format
 
 Large files are split under `shards/<cache_group>/` as `<original-file>.part-00000-of-NNNNN`. Reconstruct files by concatenating the `repo_paths` listed in `propagator_cache_manifest.json`.
 
@@ -77,9 +87,9 @@ Large files are split under `shards/<cache_group>/` as `<original-file>.part-000
 *   `*.chunk_pos.bin`: Order position of the chunk in the sequence.
 *   `*.meta.json`: Metadata detailing the count of chunks, unroll length, source row counts, vocabulary properties, and token stats.
 
-## Included Source Families
+## License and Source Terms
 
-The manifest records exact source names, row counts, preprocessing modes, and cache groups. Current source families include FineWeb-Edu, Wikipedia, VQAv2/image recognition data, instruction/dialogue datasets, Mimi-code speech corpora, and local Propagator seed/identity JSON groups. Source licenses and usage terms follow the upstream datasets listed in the manifest.
+This dataset is a processed training artifact assembled from multiple upstream datasets. Check the upstream dataset licenses and terms listed in the manifest before redistribution or commercial use.
 """
 
 # Upload Tokenizer README
