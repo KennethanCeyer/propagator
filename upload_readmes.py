@@ -6,6 +6,7 @@ from huggingface_hub import HfApi
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATASET_REPO_NAME = "propagator-multimodal-pretraining-data"
+TOKENIZER_REPO_NAME = "propagator-tokenizer"
 
 load_dotenv(PROJECT_ROOT / ".env")
 token = os.environ.get('HF_TOKEN')
@@ -18,16 +19,37 @@ api = HfApi(token=token)
 username = api.whoami().get('name')
 
 # README for propagator-tokenizer
-tokenizer_readme = """# Propagator Tokenizer
+tokenizer_readme = f"""---
+license: other
+library_name: tokenizers
+tags:
+- tokenizer
+- byte-level-bpe
+- multimodal
+- propagator
+---
 
-This repository contains the byte-level BPE tokenizer used to process text sequences for training the **Propagator** model.
+# Propagator Tokenizer
 
-## Properties
+This repository contains the tokenizer used with the [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{username}/{DATASET_REPO_NAME}).
 
-*   **Vocab Size**: 16,000
-*   **Type**: Byte-Level Byte-Pair Encoding (Byte BPE)
-*   **File**: `tokenizer.json`
-*   **Special Tokens**: Configured with custom protocol markers for session boundaries, speaker turn-taking, and multimodal alignment.
+The tokenizer is a byte-level BPE text tokenizer with Propagator protocol tokens for turn boundaries and modality markers. It is intended to be used together with the packed dataset frame format, where text tokens, image patch tokens, and audio code tokens are stored in aligned training frames.
+
+## Files
+
+*   `tokenizer.json`: Hugging Face `tokenizers` JSON file.
+
+## Token Space
+
+*   Base text BPE vocabulary: 16,000 tokens.
+*   Protocol and modality marker tokens include `[SESSION]`, `[USER]`, `[MODEL]`, `[TEXT_IN]`, `[TEXT_OUT]`, `[IMAGE_IN]`, `[AUDIO_IN]`, `[AUDIO_OUT]`, `[AUDIO_END]`, `[HYBRID_OUT]`, and related boundary/control markers.
+*   The multimodal dataset uses this tokenizer for text and control tokens. Image patch ids and audio code ids are assigned by the Propagator preprocessing pipeline and documented through the dataset format and manifest.
+
+## Related Dataset
+
+*   Dataset: [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{username}/{DATASET_REPO_NAME})
+
+Use the dataset card for source coverage, binary frame layout, and reconstruction notes.
 """
 
 # README for propagator-multimodal-pretraining-data
@@ -84,6 +106,10 @@ This is not a raw text or image browsing dataset. The examples have already been
 | [shangeth/ljspeech-mimi-codes](https://huggingface.co/datasets/shangeth/ljspeech-mimi-codes) | Speech-language | LJSpeech speech/text Mimi code examples | 13,100 | `mimi_codes_speech_text` |
 | Local prepared rows | Curated | local prepared text and vision-language examples | 491,356 | `duplex_chat`, `image_recognition` |
 
+## Tokenizer
+
+This package is encoded with the [Propagator Tokenizer](https://huggingface.co/{username}/{TOKENIZER_REPO_NAME}). The tokenizer repository contains the Hugging Face `tokenizers` JSON file used for text and protocol tokens. The packed dataset also includes model-side image patch ids and audio code ids in additional frame lanes.
+
 ## Intended Use
 
 This repository is intended for training or reproducing Propagator-style multimodal models that consume the packed Propagator frame format. It is useful if you want a ready-to-stream pretraining corpus rather than rebuilding tokenization and modality packing from the original upstream datasets.
@@ -111,7 +137,7 @@ try:
     api.upload_file(
         path_or_fileobj=tokenizer_readme.encode('utf-8'),
         path_in_repo="README.md",
-        repo_id=f"{username}/propagator-tokenizer",
+        repo_id=f"{username}/{TOKENIZER_REPO_NAME}",
         repo_type="model"
     )
     print("Uploaded README.md to propagator-tokenizer")

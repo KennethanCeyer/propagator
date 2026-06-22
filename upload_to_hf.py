@@ -23,6 +23,7 @@ PUBLIC_DATASET = os.environ.get("HF_DATASET_PUBLIC", "1").lower() not in {"0", "
 DELETE_UNSHARDED_REMOTE = os.environ.get("HF_DELETE_UNSHARDED_REMOTE", "1").lower() not in {"0", "false", "no", "off"}
 SKIP_EXISTING = os.environ.get("HF_UPLOAD_SKIP_EXISTING", "1").lower() not in {"0", "false", "no", "off"}
 DEFAULT_DATASET_REPO_NAME = "propagator-multimodal-pretraining-data"
+TOKENIZER_REPO_NAME = "propagator-tokenizer"
 
 DATA_SUFFIXES = (
     ".input.bin",
@@ -212,7 +213,42 @@ def source_table(manifest: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def dataset_readme(manifest: dict[str, Any]) -> str:
+def tokenizer_readme(tokenizer_repo: str, dataset_repo: str) -> str:
+    return f"""---
+license: other
+library_name: tokenizers
+tags:
+- tokenizer
+- byte-level-bpe
+- multimodal
+- propagator
+---
+
+# Propagator Tokenizer
+
+This repository contains the tokenizer used with the [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{dataset_repo}).
+
+The tokenizer is a byte-level BPE text tokenizer with Propagator protocol tokens for turn boundaries and modality markers. It is intended to be used together with the packed dataset frame format, where text tokens, image patch tokens, and audio code tokens are stored in aligned training frames.
+
+## Files
+
+- `tokenizer.json`: Hugging Face `tokenizers` JSON file.
+
+## Token Space
+
+- Base text BPE vocabulary: 16,000 tokens.
+- Protocol and modality marker tokens include `[SESSION]`, `[USER]`, `[MODEL]`, `[TEXT_IN]`, `[TEXT_OUT]`, `[IMAGE_IN]`, `[AUDIO_IN]`, `[AUDIO_OUT]`, `[AUDIO_END]`, `[HYBRID_OUT]`, and related boundary/control markers.
+- The multimodal dataset uses this tokenizer for text and control tokens. Image patch ids and audio code ids are assigned by the Propagator preprocessing pipeline and documented through the dataset format and manifest.
+
+## Related Dataset
+
+- Dataset: [Propagator Multimodal Pretraining Data](https://huggingface.co/datasets/{dataset_repo})
+
+Use the dataset card for source coverage, binary frame layout, and reconstruction notes.
+"""
+
+
+def dataset_readme(manifest: dict[str, Any], tokenizer_repo: str) -> str:
     tib = manifest["total_bytes"] / 1024**4
     shard_gib = manifest["shard_bytes"] / 1024**3
     visibility = "public" if PUBLIC_DATASET else "private"
@@ -259,6 +295,10 @@ This is not a raw text or image browsing dataset. The examples have already been
 {sources}
 
 The table lists source families represented in the current prepared package. Exact split names, file groups, byte sizes, and reconstruction order are recorded in `propagator_cache_manifest.json`.
+
+## Tokenizer
+
+This package is encoded with the [Propagator Tokenizer](https://huggingface.co/{tokenizer_repo}). The tokenizer repository contains the Hugging Face `tokenizers` JSON file used for text and protocol tokens. The packed dataset also includes model-side image patch ids and audio code ids in additional frame lanes.
 
 ## Intended Use
 
@@ -318,6 +358,12 @@ def ensure_public_dataset(api: HfApi, repo_id: str, token: str) -> None:
     if PUBLIC_DATASET:
         api.update_repo_settings(repo_id, repo_type="dataset", private=False, token=token)
         print(f"Dataset repo is public: {repo_id}", flush=True)
+
+
+def ensure_public_model(api: HfApi, repo_id: str, token: str) -> None:
+    create_repo(repo_id=repo_id, repo_type="model", private=False, token=token, exist_ok=True)
+    api.update_repo_settings(repo_id, repo_type="model", private=False, token=token)
+    print(f"Model repo is public: {repo_id}", flush=True)
 
 
 def delete_unsharded_remote_files(api: HfApi, repo_id: str, existing_files: set[str]) -> set[str]:
@@ -435,7 +481,7 @@ def main() -> None:
         print("ERROR: could not determine Hugging Face username", flush=True)
         sys.exit(1)
 
-    tokenizer_repo = f"{username}/propagator-tokenizer"
+    tokenizer_repo = f"{username}/{TOKENIZER_REPO_NAME}"
     dataset_repo = os.environ.get(
         "HF_DATASET_REPO",
         f"{username}/{os.environ.get('HF_DATASET_REPO_NAME', DEFAULT_DATASET_REPO_NAME)}",
@@ -446,7 +492,7 @@ def main() -> None:
     print(f"Dataset visibility target: {'public' if PUBLIC_DATASET else 'private'}", flush=True)
     print(f"Shard size: {SHARD_BYTES / 1024**3:.2f} GiB", flush=True)
 
-    create_repo(repo_id=tokenizer_repo, repo_type="model", private=True, token=token, exist_ok=True)
+    ensure_public_model(api, tokenizer_repo, token)
     ensure_public_dataset(api, dataset_repo, token)
 
     tokenizer_path = PROJECT_ROOT / "assets" / "tokenizer-byte-bpe-16000.json"
@@ -458,7 +504,7 @@ def main() -> None:
         tokenizer_repo,
         "model",
         "README.md",
-        "# Propagator Tokenizer\n\nByte-level BPE tokenizer with Propagator protocol and multimodal special tokens.\n",
+        tokenizer_readme(tokenizer_repo, dataset_repo),
         "Update tokenizer README",
     )
 
@@ -475,7 +521,14 @@ def main() -> None:
 
     existing_dataset_files = set(api.list_repo_files(dataset_repo, repo_type="dataset"))
     existing_dataset_files = delete_unsharded_remote_files(api, dataset_repo, existing_dataset_files)
-    upload_text(api, dataset_repo, "dataset", "README.md", dataset_readme(manifest), "Update sharded dataset README")
+    upload_text(
+        api,
+        dataset_repo,
+        "dataset",
+        "README.md",
+        dataset_readme(manifest, tokenizer_repo),
+        "Update sharded dataset README",
+    )
     upload_text(
         api,
         dataset_repo,
