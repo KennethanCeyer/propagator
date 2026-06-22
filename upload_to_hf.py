@@ -146,10 +146,77 @@ def build_manifest(groups: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+SOURCE_DESCRIPTIONS = {
+    "HuggingFaceFW/fineweb-edu": ("Language", "educational web text"),
+    "wikimedia/wikipedia": ("Language", "encyclopedic long-form text"),
+    "HuggingFaceM4/VQAv2": ("Vision-language", "image question answering and recognition"),
+    "xinrongzhang2022/Duplex-UltraChat": ("Dialogue", "multi-turn conversational text"),
+    "databricks/databricks-dolly-15k": ("Instruction", "instruction-following examples"),
+    "shangeth/libritts-r-mimi-codes": ("Speech-language", "LibriTTS-R speech/text Mimi code examples"),
+    "shangeth/librispeech-mimi-codes": ("Speech-language", "LibriSpeech speech/text Mimi code examples"),
+    "shangeth/vctk-mimi-codes": ("Speech-language", "VCTK speech/text Mimi code examples"),
+    "shangeth/jenny-mimi-codes": ("Speech-language", "Jenny speech/text Mimi code examples"),
+    "shangeth/ljspeech-mimi-codes": ("Speech-language", "LJSpeech speech/text Mimi code examples"),
+    "json": ("Curated", "local prepared text and vision-language examples"),
+}
+
+
+def hf_dataset_link(name: str) -> str:
+    if name == "json":
+        return "Local prepared rows"
+    return f"[{name}](https://huggingface.co/datasets/{name})"
+
+
+def source_table(manifest: dict[str, Any]) -> str:
+    rows: dict[str, dict[str, Any]] = {}
+    for group in manifest["groups"]:
+        name = group.get("dataset_name")
+        if not name:
+            continue
+        item = rows.setdefault(name, {"rows": 0, "modes": set(), "configs": set()})
+        item["rows"] += int(group.get("source_rows") or 0)
+        if group.get("dataset_mode"):
+            item["modes"].add(str(group["dataset_mode"]))
+        if group.get("dataset_config"):
+            item["configs"].add(str(group["dataset_config"]))
+
+    order = [
+        "HuggingFaceFW/fineweb-edu",
+        "wikimedia/wikipedia",
+        "HuggingFaceM4/VQAv2",
+        "xinrongzhang2022/Duplex-UltraChat",
+        "databricks/databricks-dolly-15k",
+        "shangeth/libritts-r-mimi-codes",
+        "shangeth/librispeech-mimi-codes",
+        "shangeth/vctk-mimi-codes",
+        "shangeth/jenny-mimi-codes",
+        "shangeth/ljspeech-mimi-codes",
+        "json",
+    ]
+    names = [name for name in order if name in rows] + sorted(name for name in rows if name not in order)
+    lines = [
+        "| Source dataset | Modality | Contribution | Prepared rows | Preprocessing mode |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for name in names:
+        item = rows[name]
+        modality, contribution = SOURCE_DESCRIPTIONS.get(name, ("Mixed", "processed training examples"))
+        config_suffix = ""
+        if item["configs"]:
+            config_suffix = f" ({', '.join(sorted(item['configs']))})"
+        modes = ", ".join(f"`{mode}`" for mode in sorted(item["modes"])) or "recorded in manifest"
+        lines.append(
+            f"| {hf_dataset_link(name)}{config_suffix} | {modality} | {contribution} | "
+            f"{item['rows']:,} | {modes} |"
+        )
+    return "\n".join(lines)
+
+
 def dataset_readme(manifest: dict[str, Any]) -> str:
     tib = manifest["total_bytes"] / 1024**4
     shard_gib = manifest["shard_bytes"] / 1024**3
     visibility = "public" if PUBLIC_DATASET else "private"
+    sources = source_table(manifest)
     return f"""---
 license: other
 pretty_name: Propagator Multimodal Pretraining Data
@@ -187,7 +254,11 @@ This is not a raw text or image browsing dataset. The examples have already been
 - **Vision-language:** image recognition and image question-answering style examples represented as image patch tokens plus text tokens.
 - **Speech-language:** speech/text examples represented with Mimi-style audio code tokens for ASR, TTS, and duplex audio-text training.
 
-The upstream source families include FineWeb-Edu, Wikipedia, VQAv2, instruction/dialogue datasets, and Mimi-code speech corpora derived from public speech datasets. Exact source names, row counts, split names, and preprocessing modes are recorded in `propagator_cache_manifest.json`.
+## Source Datasets
+
+{sources}
+
+The table lists source families represented in the current prepared package. Exact split names, file groups, byte sizes, and reconstruction order are recorded in `propagator_cache_manifest.json`.
 
 ## Intended Use
 

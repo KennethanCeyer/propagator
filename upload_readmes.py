@@ -68,7 +68,21 @@ This is not a raw text or image browsing dataset. The examples have already been
 *   **Vision-language:** image recognition and image question-answering style examples represented as image patch tokens plus text tokens.
 *   **Speech-language:** speech/text examples represented with Mimi-style audio code tokens for ASR, TTS, and duplex audio-text training.
 
-The upstream source families include FineWeb-Edu, Wikipedia, VQAv2, instruction/dialogue datasets, and Mimi-code speech corpora derived from public speech datasets. Exact source names, row counts, split names, and preprocessing modes are recorded in `propagator_cache_manifest.json`.
+## Source Datasets
+
+| Source dataset | Modality | Contribution | Prepared rows | Preprocessing mode |
+| --- | --- | --- | ---: | --- |
+| [HuggingFaceFW/fineweb-edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) (sample-10BT) | Language | educational web text | 9,672,101 | `plain_text` |
+| [wikimedia/wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia) (20231101.en) | Language | encyclopedic long-form text | 4,601,098 | `plain_text` |
+| [HuggingFaceM4/VQAv2](https://huggingface.co/datasets/HuggingFaceM4/VQAv2) | Vision-language | image question answering and recognition | 658,111 | `image_recognition` |
+| [xinrongzhang2022/Duplex-UltraChat](https://huggingface.co/datasets/xinrongzhang2022/Duplex-UltraChat) | Dialogue | multi-turn conversational text | 5,973,182 | `duplex_chat` |
+| [databricks/databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | Instruction | instruction-following examples | 15,011 | `dolly_instruction` |
+| [shangeth/libritts-r-mimi-codes](https://huggingface.co/datasets/shangeth/libritts-r-mimi-codes) | Speech-language | LibriTTS-R speech/text Mimi code examples | 365,042 | `mimi_codes_speech_text` |
+| [shangeth/librispeech-mimi-codes](https://huggingface.co/datasets/shangeth/librispeech-mimi-codes) | Speech-language | LibriSpeech speech/text Mimi code examples | 286,808 | `mimi_codes_speech_text` |
+| [shangeth/vctk-mimi-codes](https://huggingface.co/datasets/shangeth/vctk-mimi-codes) | Speech-language | VCTK speech/text Mimi code examples | 44,283 | `mimi_codes_speech_text` |
+| [shangeth/jenny-mimi-codes](https://huggingface.co/datasets/shangeth/jenny-mimi-codes) | Speech-language | Jenny speech/text Mimi code examples | 20,978 | `mimi_codes_speech_text` |
+| [shangeth/ljspeech-mimi-codes](https://huggingface.co/datasets/shangeth/ljspeech-mimi-codes) | Speech-language | LJSpeech speech/text Mimi code examples | 13,100 | `mimi_codes_speech_text` |
+| Local prepared rows | Curated | local prepared text and vision-language examples | 491,356 | `duplex_chat`, `image_recognition` |
 
 ## Intended Use
 
