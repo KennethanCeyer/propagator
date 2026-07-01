@@ -312,7 +312,7 @@ Previous 586M-run eval retained for comparison, completed at step 1,020,000:
 | :---: | :---: |
 | ![Composite Score](assets/val_composite_score.png) | ![Image Task Accuracy](assets/val_image_task_acc.png) |
 
-The image metric is teacher-forced token accuracy, not exact-match generation. In the step 1,020,000 probes, `red_mug` produced `parasail` and `blue_car` produced `yellow`.
+The image metric is teacher-forced token accuracy, not exact-match generation. The archived image-generation probes did not save their source pixels, so the README does not show image media for this checkpoint.
 
 ## Output Examples
 
@@ -325,10 +325,10 @@ These examples are from the previous 586M run's step 1,020,000 runtime loop. Pro
 | Turn boundary | user speech followed by `[USER_END]` | switches to `[MODEL]` then `[TEXT_OUTPUT]` |
 | Interruption-like input | user continues speaking without `[USER_END]` | response stream is not started |
 
-| Image probe | Input | Generated answer |
+| Archived generation probe | Input | Generated answer |
 | :--- | :--- | :--- |
-| `red_mug` | `A red mug is on a desk.` + `What object is visible?` | `parasail` |
-| `blue_car` | `A blue car is parked on the street.` + `What color is the car?` | `yellow` |
+| `red_mug` | synthetic image-token probe + `What object is visible?` | `parasail` |
+| `blue_car` | synthetic image-token probe + `What color is the car?` | `yellow` |
 
 | Audio prompt | Rendered sample | Notes |
 | :--- | :---: | :--- |
