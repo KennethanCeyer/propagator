@@ -4948,6 +4948,7 @@ def tokenize_dataset_rows(
         last_log_time = time.time()
         last_log_rows = source_rows
         last_log_chunks = actual_count
+        last_flush_rows = source_rows
         for result in pool.imap_unordered(_worker_tokenize_row_batch, row_gen, chunksize=imap_chunk_size):
             if shutdown_requested():
                 shutdown_during_tokenization = True
@@ -5067,8 +5068,10 @@ def tokenize_dataset_rows(
                 pbar.update(added_chunks)
             pbar.set_postfix({"chunks": actual_count})
 
-            if source_rows % max(1, int(config.cache_flush_every)) == 0:
+            flush_interval_rows = max(1, int(config.cache_flush_every))
+            if cache_storage == "disk" and source_rows - last_flush_rows >= flush_interval_rows:
                 flush_progress()
+                last_flush_rows = source_rows
             if not uncapped and actual_count >= effective_max_chunks:
                 log_info(f"[Tokenize:{split_name}] Reached target_chunks={effective_max_chunks}; terminating worker pool.")
                 stop_early = True
@@ -6828,29 +6831,24 @@ def validation_source_row(source_idx: int, row_idx: int) -> dict[str, Any] | Non
     spec = dataset_spec_for_source(source_idx)
     if spec is None:
         return None
-    preview_spec = dict(spec)
-    if (
-        str(preview_spec.get("mode", config.dataset_mode)) == "image_recognition"
-        and str(preview_spec.get("name")) not in {"json", "csv", "parquet", "text"}
-    ):
-        preview_spec["streaming"] = True
+    eval_spec = dict(spec)
     split = split_for_dataset_spec(spec, "val")
     try:
-        ds = load_dataset_from_spec(preview_spec, split)
-        ds = apply_same_split_partition(ds, preview_spec, "val", split)
-        ds = apply_data_pack_partition(ds, preview_spec, "val")
-        if split == preview_spec.get("split") and config.validation_skip_rows is not None and hasattr(ds, "skip"):
+        ds = load_dataset_from_spec(eval_spec, split)
+        ds = apply_same_split_partition(ds, eval_spec, "val", split)
+        ds = apply_data_pack_partition(ds, eval_spec, "val")
+        if split == eval_spec.get("split") and config.validation_skip_rows is not None and hasattr(ds, "skip"):
             ds = ds.skip(int(config.validation_skip_rows))
         for row in safe_dataset_iter(
             ds,
             repeat_count=1,
             skip_rows=int(row_idx),
-            skip_log_label=f"EvalPreview:{preview_spec.get('name')}",
+            skip_log_label=f"EvalFixed:{eval_spec.get('name')}",
         ):
             return dict(row)
     except Exception as exc:
         log_info(
-            f"[Validation Samples] Could not reload source row for preview: "
+            f"[Validation Samples] Could not load fixed validation source row: "
             f"source_idx={source_idx}, row_idx={row_idx}, error={type(exc).__name__}: {exc}"
         )
     return None
@@ -8486,6 +8484,7 @@ def main() -> None:
 
     # Load tokenizer and datasets BEFORE JAX initialization to avoid fork deadlocks
     loaded = load_tokenizer_and_datasets()
+    prepare_fixed_dataset_eval_cases()
 
     # Initialize JAX and sharding
     log_info(f"Tokenization done. Initializing JAX...")
