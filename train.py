@@ -285,19 +285,6 @@ _ACTIVE_POOLS: list[Any] = []
 _SHUTDOWN_REQUESTED = False
 _SHUTDOWN_SIGNAL: int | None = None
 _SHUTDOWN_SIGNAL_COUNT = 0
-train_control_input_tokens: np.ndarray | None = None
-train_control_target_tokens: np.ndarray | None = None
-train_control_loss_weights: np.ndarray | None = None
-train_control_stream_ids: np.ndarray | None = None
-train_control_chunk_positions: np.ndarray | None = None
-train_control_chunk_task_ids: np.ndarray | None = None
-val_control_input_tokens: np.ndarray | None = None
-val_control_target_tokens: np.ndarray | None = None
-val_control_loss_weights: np.ndarray | None = None
-val_control_stream_ids: np.ndarray | None = None
-val_control_chunk_positions: np.ndarray | None = None
-val_control_chunk_task_ids: np.ndarray | None = None
-
 VALIDATION_METRIC_SIZE = 44
 
 SPECIAL_TOKENS = [
@@ -316,7 +303,6 @@ SPECIAL_TOKENS = [
     "[AUDIO_INPUT]",
     "[AUDIO_OUTPUT]",
     "[IMAGE_INPUT]",
-    "[IMAGE_OUTPUT]",
     "[SILENCE]",
 ]
 
@@ -482,31 +468,18 @@ class PropagatorConfig(BaseSettings):
     train_log_every: int = 2000
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.01
-    eval_validation_samples: int = 8
-    sample_gen_len: int = 256
-    sample_chunks: str = '["Reply with only the second city in this list:", "Seoul, Lima, Oslo."]'
-    eval_text_cases: str = json.dumps(
+    eval_dataset_cases: str = json.dumps(
         [
-            {"name": "identity_name", "chunks": ["What", "is your name?"]},
-            {
-                "name": "instruction_summary",
-                "chunks": [
-                    "Summarize in one sentence:",
-                    "The museum changed its weekend hours, added a family tour, and moved ticket pickup to the west entrance.",
-                ],
-            },
-            {"name": "factual_qa", "chunks": ["What is the capital", "of France?"]},
-            {"name": "reasoning", "chunks": ["A box has three red balls and two blue balls.", "How many balls are there?"]},
-            {"name": "context_recall", "chunks": ["The code word is amber.", "Repeat only the code word."]},
-            {"name": "command_following", "chunks": ["Reply with only the second city in this list:", "Seoul, Lima, Oslo."]},
-            {"name": "extraction", "chunks": ["Extract device and location:", "Sensor A12 reports 71 C in bay 4."]},
-            {"name": "classification", "chunks": ["Classify the message as praise, complaint, or question:", "The delivery arrived late and the box was open."]},
-            {"name": "architecture", "chunks": ["In one sentence,", "how does Propagator store context?"]},
-            {"name": "turn_policy_silence", "chunks": ["I am still speaking", "[SILENCE]", "[SILENCE]"]},
+            {"name": "text_dolly_000032", "source_idx": 4, "row_idx": 32},
+            {"name": "text_dolly_000033", "source_idx": 4, "row_idx": 33},
+            {"name": "image_vqav2_000000", "source_idx": 2, "row_idx": 0},
+            {"name": "image_vqav2_000001", "source_idx": 2, "row_idx": 1},
+            {"name": "audio_libritts_000004", "source_idx": 7, "row_idx": 4},
+            {"name": "audio_librispeech_000007", "source_idx": 10, "row_idx": 7},
         ],
         separators=(",", ":"),
     )
-    eval_image_cases: str = json.dumps([], separators=(",", ":"))
+    sample_gen_len: int = 256
     temperature: float = 0.7
     top_k: int = 50
 
@@ -564,13 +537,8 @@ class PropagatorConfig(BaseSettings):
     stateful_train: bool = True
     stateful_validation: bool = True
     validation_batches: int = 16
-    validation_control_batches: int = 0
     same_split_validation_stride: int = 10
     same_split_validation_offset: int = 0
-    synthetic_control_train_examples: int = 2048
-    synthetic_control_val_examples: int = 512
-    synthetic_control_train_rate: float = 0.05
-    synthetic_interrupt_fraction: float = 0.60
 
     tokenizer_path: str = "assets/tokenizer-byte-bpe-16000.json"
     tokenizer_vocab_size: int = 16_000
@@ -593,16 +561,6 @@ class PropagatorConfig(BaseSettings):
     max_audio_tokens_per_row: int = 0
     audio_task_mix: str = '{"asr":0.25,"tts":0.35,"audio":0.20,"hybrid":0.20}'
     tts_prompt_template: str = "Say this aloud: {text}"
-    audio_eval_prompt: str = "Say this aloud: hello, I am listening."
-    audio_eval_prompts: str = json.dumps(
-        [
-            "Say this aloud: the code word is amber.",
-            "Read this number sequence aloud: two, seven, four.",
-        ],
-        separators=(",", ":"),
-    )
-    eval_audio_samples: int = 2
-    eval_audio_every: int = 20_000
     audio_frames_per_second: float = 12.5
     eval_audio_seconds: float = 5.0
     eval_audio_tokens: int = 3000
@@ -647,6 +605,8 @@ class PropagatorConfig(BaseSettings):
     local_eval_keep: int = 8
     local_checkpoint_keep: int = 1
     resume_checkpoint: bool = True
+    eval_only_checkpoint: str | None = None
+    eval_only_output_dir: str | None = None
 
     enable_data_sharding: bool = True
     data_axis_name: str = "data"
@@ -710,7 +670,6 @@ token_ids_silence: int
 token_ids_text_in: int
 token_ids_text_out: int
 token_ids_image_in: int
-token_ids_image_out: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -745,7 +704,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-log-every", type=int)
     parser.add_argument("--early-stopping-patience", type=int)
     parser.add_argument("--early-stopping-min-delta", type=float)
-    parser.add_argument("--eval-validation-samples", type=int)
+    parser.add_argument("--eval-dataset-cases", type=str)
     parser.add_argument("--sample-gen-len", type=int)
     parser.add_argument("--sample-chunks", type=str)
     parser.add_argument("--eval-text-cases", type=str)
@@ -827,13 +786,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stateful-validation", action="store_true")
     parser.add_argument("--stateless-validation", action="store_true")
     parser.add_argument("--validation-batches", type=int)
-    parser.add_argument("--validation-control-batches", type=int)
     parser.add_argument("--same-split-validation-stride", type=int)
     parser.add_argument("--same-split-validation-offset", type=int)
-    parser.add_argument("--synthetic-control-train-examples", type=int)
-    parser.add_argument("--synthetic-control-val-examples", type=int)
-    parser.add_argument("--synthetic-control-train-rate", type=float)
-    parser.add_argument("--synthetic-interrupt-fraction", type=float)
 
     parser.add_argument("--tokenizer-path", type=str)
     parser.add_argument("--tokenizer-vocab-size", type=int)
@@ -858,10 +812,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-audio-tokens-per-row", type=int)
     parser.add_argument("--audio-task-mix", type=str)
     parser.add_argument("--tts-prompt-template", type=str)
-    parser.add_argument("--audio-eval-prompt", type=str)
-    parser.add_argument("--audio-eval-prompts", type=str)
-    parser.add_argument("--eval-audio-samples", type=int)
-    parser.add_argument("--eval-audio-every", type=int)
     parser.add_argument("--audio-frames-per-second", type=float)
     parser.add_argument("--eval-audio-seconds", type=float)
     parser.add_argument("--eval-audio-tokens", type=int)
@@ -908,6 +858,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local-eval-keep", type=int)
     parser.add_argument("--local-checkpoint-keep", type=int)
     parser.add_argument("--no-checkpoint-resume", action="store_true")
+    parser.add_argument("--eval-only-checkpoint", type=str)
+    parser.add_argument("--eval-only-output-dir", type=str)
     parser.add_argument("--enable-data-sharding", action="store_true")
     parser.add_argument("--no-data-sharding", action="store_true")
     parser.add_argument("--auto-batch-hbm-gb", type=float)
@@ -1920,7 +1872,19 @@ def load_or_train_tokenizer() -> Tokenizer:
 
 
 def ensure_special_tokens(tokenizer_obj: Tokenizer) -> dict[str, int]:
-    missing = [tok for tok in SPECIAL_TOKENS if tokenizer_obj.token_to_id(tok) is None]
+    legacy_token_aliases = {
+        "[TEXT_INPUT]": "[TEXT_IN]",
+        "[TEXT_OUTPUT]": "[TEXT_OUT]",
+        "[AUDIO_INPUT]": "[AUDIO_IN]",
+        "[AUDIO_OUTPUT]": "[AUDIO_OUT]",
+        "[IMAGE_INPUT]": "[IMAGE_IN]",
+    }
+    missing = [
+        tok
+        for tok in SPECIAL_TOKENS
+        if tokenizer_obj.token_to_id(tok) is None
+        and tokenizer_obj.token_to_id(legacy_token_aliases.get(tok, "")) is None
+    ]
     if missing:
         log_info(f"Adding missing special tokens to tokenizer: {missing}")
         tokenizer_obj.add_special_tokens(missing)
@@ -1931,6 +1895,8 @@ def ensure_special_tokens(tokenizer_obj: Tokenizer) -> dict[str, int]:
     for tok in SPECIAL_TOKENS:
         idx = tokenizer_obj.token_to_id(tok)
         if idx is None:
+            idx = tokenizer_obj.token_to_id(legacy_token_aliases.get(tok, ""))
+        if idx is None:
             raise ValueError(f"Failed to add special token to tokenizer: {tok}")
         ids[tok.strip("[]").lower()] = int(idx)
     aliases = {
@@ -1939,7 +1905,6 @@ def ensure_special_tokens(tokenizer_obj: Tokenizer) -> dict[str, int]:
         "audio_in": "audio_input",
         "audio_out": "audio_output",
         "image_in": "image_input",
-        "image_out": "image_output",
     }
     for alias, canonical in aliases.items():
         if canonical in ids:
@@ -2290,7 +2255,6 @@ def control_token_ids() -> set[int]:
         token_ids["user_interrupt"],
         token_ids["audio_in"],
         token_ids.get("image_in", -1),
-        token_ids.get("image_out", -1),
         token_ids["audio_out"],
         token_ids["silence"],
         token_ids["text_in"],
@@ -2318,7 +2282,6 @@ def new_target_stats() -> dict[str, int]:
         "audio": 0,
         "audio_out": 0,
         "image_in": 0,
-        "image_out": 0,
         "image": 0,
         "listen": 0,
         "user_end": 0,
@@ -2346,7 +2309,7 @@ def default_loss_weight_for_target(target_id: int) -> float:
         return float(config.listen_loss_weight)
     if target_id == token_ids["audio_out"]:
         return float(config.audio_out_loss_weight)
-    if target_id in {token_ids["text_out"], token_ids.get("image_out", -1)}:
+    if target_id == token_ids["text_out"]:
         return float(config.output_modality_loss_weight)
     if is_audio_token_id(target_id):
         return float(config.audio_token_loss_weight)
@@ -2427,9 +2390,6 @@ def add_target_stats(stats: dict[str, int], target_id: int, weight: float) -> No
     elif target_id == token_ids["text_out"]:
         stats["text_out"] += 1
         stats["control"] += 1
-    elif target_id == token_ids.get("image_out", -1):
-        stats["image_out"] += 1
-        stats["control"] += 1
     elif is_audio_token_id(target_id):
         stats["audio"] += 1
     elif is_control_id(target_id):
@@ -2471,9 +2431,6 @@ def remove_target_stats(stats: dict[str, int], target_id: int, weight: float) ->
         stats["control"] -= 1
     elif target_id == token_ids["text_out"]:
         stats["text_out"] -= 1
-        stats["control"] -= 1
-    elif target_id == token_ids.get("image_out", -1):
-        stats["image_out"] -= 1
         stats["control"] -= 1
     elif is_audio_token_id(target_id):
         stats["audio"] -= 1
@@ -4010,154 +3967,6 @@ def chunk_tokenized_stream(
         chunks.append((chunk_in, chunk_tr, chunk_w, stats))
 
     return chunks
-
-
-def synthetic_control_rows(count: int, *, split_name: str) -> list[dict[str, Any]]:
-    if count <= 0:
-        return []
-
-    scenarios = [
-        {
-            "prompt": "What is your name?",
-            "response": "I'm Propagator.",
-            "interrupt": "What is your purpose?",
-            "revised": "I am a research model for streaming dialogue with fixed-size memory.",
-            "followup": "How do you store context?",
-            "followup_response": "I update a persistent associative memory matrix as the stream advances.",
-        },
-        {
-            "prompt": "Please summarize a robot safety checklist.",
-            "response": "Check the emergency stop, clear the work area, and verify guards before operation.",
-            "interrupt": "Make that shorter.",
-            "revised": "Check the stop, area, and guards.",
-            "followup": "What is the first item?",
-            "followup_response": "Check the emergency stop.",
-        },
-        {
-            "prompt": "Explain the memory matrix slowly.",
-            "response": "The model reads from a fixed-size matrix, then writes a small update after each token.",
-            "interrupt": "Use simpler words.",
-            "revised": "It keeps a small memory and updates it one token at a time.",
-            "followup": "Does it grow with the conversation?",
-            "followup_response": "No. Its shape stays fixed.",
-        },
-        {
-            "prompt": "What should I inspect in a failing training run?",
-            "response": "Inspect data examples, per-task validation metrics, generated samples, and gradient scale.",
-            "interrupt": "Focus on the data first.",
-            "revised": "Inspect raw rows, transformed tokens, masks, and source proportions first.",
-            "followup": "What comes after data checks?",
-            "followup_response": "Check per-task loss and generated outputs.",
-        },
-        {
-            "prompt": "Describe the audio pipeline.",
-            "response": "Audio is resampled, encoded into codec frames, and trained with one target per codebook.",
-            "interrupt": "Only explain the codec step.",
-            "revised": "The codec converts waveform segments into synchronized discrete codebook IDs.",
-            "followup": "Why must frames stay aligned?",
-            "followup_response": "All codebooks describe the same audio frame and must be predicted together.",
-        },
-        {
-            "prompt": "Give me a short answer: what is overfitting?",
-            "response": "Overfitting is learning the training examples without generalizing well to new ones.",
-            "interrupt": "One sentence only.",
-            "revised": "Overfitting is memorizing training patterns that do not generalize.",
-            "followup": "How can validation reveal it?",
-            "followup_response": "Training improves while held-out performance stalls or worsens.",
-        },
-    ]
-
-    rows: list[dict[str, Any]] = []
-    interrupt_fraction = max(0.0, min(1.0, float(config.synthetic_interrupt_fraction)))
-    interrupt_count = int(round(count * interrupt_fraction))
-    for idx in range(count):
-        is_interrupt = idx < interrupt_count
-        scenario = scenarios[idx % len(scenarios)]
-        if is_interrupt:
-            rows.append(
-                {
-                    "allow_user_interrupts": True,
-                    "output": [
-                        {"role": "user", "content": scenario["prompt"]},
-                        {"role": "assistant", "content": scenario["response"]},
-                        {"role": "user", "content": scenario["interrupt"]},
-                        {"role": "assistant", "content": scenario["revised"]},
-                    ],
-                }
-            )
-        else:
-            rows.append(
-                {
-                    "allow_user_interrupts": False,
-                    "output": [
-                        {"role": "user", "content": scenario["prompt"]},
-                        {"role": "assistant", "content": scenario["response"]},
-                        {"role": "user", "content": scenario["followup"]},
-                        {"role": "assistant", "content": scenario["followup_response"]},
-                    ],
-                }
-            )
-    rng = np.random.default_rng(config.seed + (17 if split_name == "train" else 31))
-    rng.shuffle(rows)
-    return rows
-
-
-def build_synthetic_control_chunks(
-    split_name: str,
-    example_count: int,
-    stream_offset: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    rows = synthetic_control_rows(example_count, split_name=split_name)
-    unroll_len = int(config.train_unroll_len)
-    pad_id = token_ids["pad"]
-    input_chunks: list[np.ndarray] = []
-    target_chunks: list[np.ndarray] = []
-    weight_chunks: list[np.ndarray] = []
-    stream_ids_local: list[int] = []
-    chunk_positions_local: list[int] = []
-    aggregate_stats = {**new_target_stats(), "source_rows": 0, "skipped_chunks": 0, "errors": 0}
-
-    for row_idx, row in enumerate(rows):
-        try:
-            in_ids, tr_ids, row_weights, _ = tokenize_duplex(
-                row,
-                allow_user_interrupts=bool(row.get("allow_user_interrupts", False)),
-            )
-            chunks = chunk_tokenized_stream(in_ids, tr_ids, row_weights, unroll_len)
-        except Exception:
-            aggregate_stats["errors"] += 1
-            continue
-        if not chunks:
-            aggregate_stats["skipped_chunks"] += 1
-            continue
-        for chunk_pos, (chunk_in, chunk_tr, chunk_w, chunk_stats) in enumerate(chunks):
-            input_chunks.append(np.asarray(pad_to_len(chunk_in, unroll_len, pad_id), dtype=np.int32))
-            target_chunks.append(np.asarray(pad_to_len(chunk_tr, unroll_len, pad_id), dtype=np.int32))
-            weight_chunks.append(np.asarray(pad_weights(chunk_w, unroll_len), dtype=np.float32))
-            stream_ids_local.append(stream_offset + row_idx)
-            chunk_positions_local.append(chunk_pos)
-            for key, value in chunk_stats.items():
-                aggregate_stats[key] += int(value)
-        aggregate_stats["source_rows"] += 1
-
-    if not input_chunks:
-        empty_inputs = np.zeros((0, unroll_len, 8), dtype=np.int32)
-        empty_weights = np.zeros((0, unroll_len), dtype=np.float32)
-        empty_ids = np.zeros((0,), dtype=np.int64)
-        empty_pos = np.zeros((0,), dtype=np.int32)
-        return empty_inputs, empty_inputs.copy(), empty_weights, empty_ids, empty_pos
-
-    log_info(
-        f"[Synthetic:{split_name}] built control chunks={len(input_chunks)} "
-        f"from rows={aggregate_stats['source_rows']}: {json.dumps(aggregate_stats, ensure_ascii=False)}"
-    )
-    return (
-        np.stack(input_chunks, axis=0),
-        np.stack(target_chunks, axis=0),
-        np.stack(weight_chunks, axis=0),
-        np.asarray(stream_ids_local, dtype=np.int64),
-        np.asarray(chunk_positions_local, dtype=np.int32),
-    )
 
 
 def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0, skip_log_label: str | None = None):
@@ -5783,11 +5592,7 @@ def build_audio_codebook_candidate_token_ids(codebook_idx: int, allow_stop: bool
 
 
 def audio_segment_stop_token_ids() -> set[int]:
-    ids = {token_ids["model_end"], token_ids["session_end"], token_ids["text_out"]}
-    image_out = token_ids.get("image_out", -1)
-    if image_out >= 0:
-        ids.add(image_out)
-    return ids
+    return {token_ids["model_end"], token_ids["session_end"], token_ids["text_out"]}
 
 
 def rms_norm(x: jax.Array) -> jax.Array:
@@ -6235,7 +6040,6 @@ class PropagatorModel(nnx.Module):
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_session_end)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_text_out)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_out)
-                special_mask = jnp.logical_or(special_mask, main_target == token_ids_image_out)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_pad)
 
                 text_mask = jnp.logical_and(supervised, jnp.logical_not(audio_mask))
@@ -6546,115 +6350,6 @@ def run_validation_step_stateful(
         )
 
 
-def _validation_prediction_step_impl(
-    model: PropagatorModel,
-    inputs: jax.Array,
-    targets: jax.Array,
-    memories: tuple[jax.Array, ...],
-    reset_mask: jax.Array,
-    chunk_positions: jax.Array,
-) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-    input_mask = inputs[..., 0] != token_ids_pad if inputs.ndim == 3 else inputs != token_ids_pad
-    memories = model.reset_memories(memories, reset_mask)
-    step_positions = (
-        chunk_positions.astype(jnp.int32)[:, None] * int(model.cfg.train_unroll_len)
-        + jnp.arange(inputs.shape[1], dtype=jnp.int32)[None, :]
-    )
-
-    def scan_step(carry, step_inputs):
-        step_in, step_target, step_valid, step_position = step_inputs
-        hidden, next_carry = model.step_hidden(step_in, carry, step_valid, step_position)
-        step_logits = model.project_full(hidden)
-        main_target = step_target[:, 0] if step_target.ndim == 2 else step_target
-
-        text_logits = step_logits[:, :text_vocab_size]
-        text_pred = jnp.argmax(text_logits, axis=-1).astype(jnp.int32)
-
-        q0_start = int(audio_token_start)
-        q0_end = q0_start + int(model.cfg.audio_codebook_size)
-        q0_logits = step_logits[:, q0_start:q0_end]
-        q0_pred = jnp.argmax(q0_logits, axis=-1).astype(jnp.int32) + q0_start
-        is_audio_main_target = jnp.logical_and(main_target >= q0_start, main_target < q0_end)
-        pred = jnp.where(is_audio_main_target, q0_pred, text_pred)
-        return next_carry, pred
-
-    final_memories, preds_t = jax.lax.scan(
-        scan_step,
-        memories,
-        (
-            jnp.swapaxes(inputs, 0, 1),
-            jnp.swapaxes(targets, 0, 1),
-            input_mask.T,
-            step_positions.T,
-        ),
-    )
-    return jnp.swapaxes(preds_t, 0, 1), tuple(jax.lax.stop_gradient(m) for m in final_memories)
-
-
-def build_validation_prediction_step() -> Any:
-    if batch_sharding is None or vector_sharding is None or memory_sharding is None:
-        if data_mesh is None:
-            return nnx.jit(_validation_prediction_step_impl)
-        with jax.sharding.set_mesh(data_mesh):
-            return nnx.jit(_validation_prediction_step_impl)
-    memory_shardings = tuple(memory_sharding for _ in range(config.num_layers))
-    if data_mesh is None:
-        return nnx.jit(
-            _validation_prediction_step_impl,
-            in_shardings=(
-                None,
-                batch_sharding,
-                batch_sharding,
-                memory_shardings,
-                vector_sharding,
-                vector_sharding,
-            ),
-            out_shardings=(batch_sharding, memory_shardings),
-        )
-    with jax.sharding.set_mesh(data_mesh):
-        return nnx.jit(
-            _validation_prediction_step_impl,
-            in_shardings=(
-                None,
-                batch_sharding,
-                batch_sharding,
-                memory_shardings,
-                vector_sharding,
-                vector_sharding,
-            ),
-            out_shardings=(batch_sharding, memory_shardings),
-        )
-
-
-def run_validation_prediction_step(
-    validation_prediction_step_fn: Any,
-    model: PropagatorModel,
-    batch_inputs: jax.Array,
-    batch_targets: jax.Array,
-    memories: tuple[jax.Array, ...],
-    reset_mask: jax.Array,
-    chunk_positions: jax.Array,
-) -> tuple[jax.Array, tuple[jax.Array, ...]]:
-    if data_mesh is None:
-        return validation_prediction_step_fn(
-            model,
-            batch_inputs,
-            batch_targets,
-            memories,
-            reset_mask,
-            chunk_positions,
-        )
-    with jax.sharding.set_mesh(data_mesh):
-        return validation_prediction_step_fn(
-            model,
-            batch_inputs,
-            batch_targets,
-            memories,
-            reset_mask,
-            chunk_positions,
-        )
-
-
 @nnx.jit
 def runtime_step_full(
     model: PropagatorModel,
@@ -6884,7 +6579,6 @@ def token_label(token_id: int) -> str:
         token_ids_text_in: "[TEXT_INPUT]",
         token_ids_text_out: "[TEXT_OUTPUT]",
         token_ids_image_in: "[IMAGE_INPUT]",
-        token_ids_image_out: "[IMAGE_OUTPUT]",
     }
     if token_id in names:
         return names[token_id]
@@ -6896,100 +6590,6 @@ def token_label(token_id: int) -> str:
         return f"<image:{int(token_id) - int(image_token_start)}>"
     decoded = tokenizer.decode([int(token_id)], skip_special_tokens=False)
     return decoded if decoded else f"<tok:{token_id}>"
-
-
-def parse_sample_chunks() -> list[str]:
-    raw = config.sample_chunks.strip()
-    if not raw:
-        return ["Hello!"]
-    try:
-        value = json.loads(raw)
-        if isinstance(value, str):
-            return [value]
-        if isinstance(value, list):
-            chunks = [str(x) for x in value if str(x)]
-            return chunks or ["Hello!"]
-    except json.JSONDecodeError:
-        pass
-    return [part for part in raw.split("|") if part] or ["Hello!"]
-
-
-def parse_eval_text_cases() -> list[dict[str, Any]]:
-    raw = (config.eval_text_cases or "").strip()
-    cases: list[dict[str, Any]] = []
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                for idx, item in enumerate(parsed):
-                    if isinstance(item, dict):
-                        chunks = item.get("chunks", item.get("prompt", []))
-                        if isinstance(chunks, str):
-                            chunks = [chunks]
-                        chunks = [str(x) for x in chunks if str(x)]
-                        if chunks:
-                            cases.append({"name": str(item.get("name", f"case_{idx:02d}")), "chunks": chunks})
-                    elif isinstance(item, str) and item:
-                        cases.append({"name": f"case_{idx:02d}", "chunks": [item]})
-        except json.JSONDecodeError:
-            pass
-    if not cases:
-        cases.append({"name": "default", "chunks": parse_sample_chunks()})
-    return cases
-
-
-def eval_case_has_image_payload(item: dict[str, Any]) -> bool:
-    keys = [
-        "image",
-        "images",
-        "frame",
-        "camera_image",
-        "camera_frame",
-        "pixels",
-        "image_path",
-        "path",
-        "file",
-        "image_tokens",
-        "visual_tokens",
-        "vision_tokens",
-        "image_codes",
-        "visual_codes",
-    ]
-    for key in keys:
-        value = item.get(key)
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        if isinstance(value, (list, tuple, dict)) and len(value) == 0:
-            continue
-        return True
-    return False
-
-
-def parse_eval_image_cases() -> list[dict[str, Any]]:
-    raw = (config.eval_image_cases or "").strip()
-    cases: list[dict[str, Any]] = []
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                for idx, item in enumerate(parsed):
-                    if not isinstance(item, dict):
-                        continue
-                    if not eval_case_has_image_payload(item):
-                        continue
-                    image_text = str(item.get("image_text") or item.get("caption") or item.get("description") or "").strip()
-                    question = str(item.get("question") or item.get("prompt") or "Describe the image.").strip()
-                    if question:
-                        case = dict(item)
-                        case["name"] = str(item.get("name") or f"image_case_{idx:02d}")
-                        case["image_text"] = image_text or "image"
-                        case["question"] = question
-                        cases.append(case)
-        except json.JSONDecodeError:
-            pass
-    return cases
 
 
 def safe_filename(value: str) -> str:
@@ -7014,13 +6614,6 @@ def step_runtime(
         return logits, memories, np.asarray(candidate_token_ids_host, dtype=np.int32)
     logits, memories = runtime_step_full(model, input_id, memories, valid, positions)
     return logits, memories, None
-
-
-def argmax_token_from_logits(logits: jax.Array, candidate_ids: np.ndarray | None = None) -> int:
-    values = np.asarray(jax.device_get(logits[0]))
-    if candidate_ids is None:
-        return int(values.argmax())
-    return int(candidate_ids[int(values.argmax())])
 
 
 def sample_model_token_from_logits(
@@ -7054,124 +6647,6 @@ def sample_model_token_from_logits(
     return int(jax.device_get(token[0]))
 
 
-def user_mode_effective_decision(raw_token_id: int) -> int:
-    if raw_token_id == token_ids_user_end:
-        return token_ids_user_end
-    return token_ids_listen
-
-
-def generate_sample(
-    model: PropagatorModel,
-    seed: int,
-    use_candidate_head: bool = True,
-    chunks: list[str] | None = None,
-    case_name: str = "default",
-) -> str:
-    chunks = chunks if chunks is not None else parse_sample_chunks()
-    key = jax.random.PRNGKey(seed)
-    memories = model.initial_memories(1)
-    position = 0
-    lines: list[str] = []
-
-    lines.append("# runtime loop sample")
-    lines.append(f"case: {case_name}")
-    lines.append("")
-    lines.append("## user stream")
-
-    logits, memories, candidate_ids_np = step_runtime(model, token_ids_session, memories, use_candidate_head, position)
-    position += 1
-    raw = argmax_token_from_logits(logits, candidate_ids_np)
-    lines.append(f"[SESSION] -> {token_label(user_mode_effective_decision(raw))}")
-
-    logits, memories, candidate_ids_np = step_runtime(model, token_ids_user, memories, use_candidate_head, position)
-    position += 1
-    raw = argmax_token_from_logits(logits, candidate_ids_np)
-    lines.append(f"[USER] -> {token_label(user_mode_effective_decision(raw))}")
-
-    effective_decision = token_ids_listen
-    for chunk in chunks:
-        tokenized = encode_text(chunk)
-        if not tokenized:
-            lines.append(f"{json.dumps(chunk, ensure_ascii=False)} -> [LISTEN]")
-            continue
-
-        raw = token_ids_listen
-        for token_id in tokenized:
-            logits, memories, candidate_ids_np = step_runtime(model, token_id, memories, use_candidate_head, position)
-            position += 1
-            raw = argmax_token_from_logits(logits, candidate_ids_np)
-
-        effective_decision = user_mode_effective_decision(raw)
-        lines.append(f"{json.dumps(chunk, ensure_ascii=False)} -> {token_label(effective_decision)}")
-
-        if effective_decision == token_ids_user_end:
-            break
-
-    if effective_decision != token_ids_user_end:
-        lines.append("")
-        lines.append("## model stream")
-        lines.append("not started because runtime policy did not receive [USER_END].")
-        return "\n".join(lines) + "\n"
-
-    lines.append("")
-    lines.append("## model stream")
-
-    logits, memories, candidate_ids_np = step_runtime(model, token_ids_user_end, memories, use_candidate_head, position)
-    position += 1
-    raw = argmax_token_from_logits(logits, candidate_ids_np)
-    lines.append(f"[USER_END] -> {token_label(raw)}")
-
-    if raw != token_ids_model:
-        lines.append(f"stopped: expected [MODEL], got {token_label(raw)}")
-        return "\n".join(lines) + "\n"
-
-    current_input = token_ids_model
-    logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
-    position += 1
-
-    for _ in range(config.sample_gen_len):
-        key, subkey = jax.random.split(key)
-        next_token = sample_model_token_from_logits(logits, subkey, candidate_ids_np, use_candidate_head)
-        lines.append(f"{token_label(current_input)} -> {token_label(next_token)}")
-
-        if next_token in {token_ids_model_end, token_ids_session_end, token_ids_listen}:
-            break
-
-        current_input = next_token
-        logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
-        position += 1
-
-    return "\n".join(lines) + "\n"
-
-
-def generate_text_eval_samples(
-    model: PropagatorModel,
-    seed: int,
-    out_dir: Path,
-    use_candidate_head: bool,
-) -> list[dict[str, Any]]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    metas: list[dict[str, Any]] = []
-    combined: list[str] = []
-    for idx, case in enumerate(parse_eval_text_cases()):
-        name = str(case["name"])
-        chunks = [str(x) for x in case["chunks"]]
-        sample = generate_sample(
-            model,
-            seed + idx,
-            use_candidate_head=use_candidate_head,
-            chunks=chunks,
-            case_name=name,
-        )
-        file_name = f"sample_{idx:02d}_{safe_filename(name)}.txt"
-        (out_dir / file_name).write_text(sample, encoding="utf-8")
-        combined.append(sample)
-        metas.append({"name": name, "chunks": chunks, "path": str(out_dir / file_name)})
-    (out_dir / "sample.txt").write_text(("\n\n" + "=" * 80 + "\n\n").join(combined), encoding="utf-8")
-    (out_dir / "text_generations.json").write_text(json.dumps(metas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return metas
-
-
 def feed_runtime_tokens(
     model: PropagatorModel,
     memories: tuple[jax.Array, ...],
@@ -7188,126 +6663,6 @@ def feed_runtime_tokens(
     if logits is None:
         raise ValueError("No runtime tokens were provided")
     return logits, memories, candidate_ids_np, position
-
-
-def generate_image_eval_sample(
-    model: PropagatorModel,
-    seed: int,
-    out_dir: Path,
-    case: dict[str, Any],
-    sample_idx: int,
-    use_candidate_head: bool,
-) -> dict[str, Any]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    key = jax.random.PRNGKey(seed)
-    memories = model.initial_memories(1)
-    position = 0
-    image_text = str(case["image_text"])
-    question = str(case["question"])
-    name = str(case["name"])
-    image_ids = image_patch_token_ids(case, image_text, case)
-    lines = [
-        "# image recognition runtime sample",
-        f"case: {name}",
-        f"image_text: {image_text}",
-        f"question: {question}",
-        f"num_image_tokens: {len(image_ids)}",
-        "",
-        "## user stream",
-    ]
-
-    prefix_ids = [
-        token_ids_session,
-        token_ids_user,
-        *_tokenize_modal_input_prefix("image"),
-        *image_ids,
-        token_ids_text_in,
-        *encode_text(question),
-    ]
-    logits, memories, candidate_ids_np, position = feed_runtime_tokens(
-        model,
-        memories,
-        prefix_ids,
-        use_candidate_head,
-        position,
-    )
-    raw = argmax_token_from_logits(logits, candidate_ids_np)
-    decision = user_mode_effective_decision(raw)
-    lines.append(f"[IMAGE_INPUT] + {len(image_ids)} image tokens + [TEXT_INPUT] question -> {token_label(decision)}")
-
-    generated: list[int] = []
-    if decision == token_ids_user_end:
-        logits, memories, candidate_ids_np = step_runtime(model, token_ids_user_end, memories, use_candidate_head, position)
-        position += 1
-        raw = argmax_token_from_logits(logits, candidate_ids_np)
-        lines.append(f"[USER_END] -> {token_label(raw)}")
-        if raw == token_ids_model:
-            current_input = token_ids_model
-            logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
-            position += 1
-            lines.append("")
-            lines.append("## model stream")
-            for _ in range(config.sample_gen_len):
-                key, subkey = jax.random.split(key)
-                next_token = sample_model_token_from_logits(logits, subkey, candidate_ids_np, use_candidate_head)
-                generated.append(next_token)
-                lines.append(f"{token_label(current_input)} -> {token_label(next_token)}")
-                if next_token in {token_ids_model_end, token_ids_session_end, token_ids_listen}:
-                    break
-                current_input = next_token
-                logits, memories, candidate_ids_np = step_runtime(model, current_input, memories, use_candidate_head, position)
-                position += 1
-        else:
-            lines.append(f"stopped: expected [MODEL], got {token_label(raw)}")
-    else:
-        lines.append("not started because runtime policy did not receive [USER_END].")
-
-    text = decode_text_token_ids_for_eval(generated)
-    sample_path = out_dir / f"image_sample_{sample_idx:02d}_{safe_filename(name)}.txt"
-    sample_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {
-        "name": name,
-        "image_text": image_text,
-        "question": question,
-        "generated_text": text,
-        "num_image_tokens": len(image_ids),
-        "num_generated_tokens": len(generated),
-        "path": str(sample_path),
-    }
-
-
-def generate_image_eval_samples(
-    model: PropagatorModel,
-    seed: int,
-    out_dir: Path,
-    use_candidate_head: bool,
-) -> list[dict[str, Any]]:
-    metas = [
-        generate_image_eval_sample(model, seed + idx, out_dir, case, idx, use_candidate_head)
-        for idx, case in enumerate(parse_eval_image_cases())
-    ]
-    (out_dir / "image_generations.json").write_text(json.dumps(metas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return metas
-
-
-def parse_audio_eval_prompts() -> list[str]:
-    raw = (config.audio_eval_prompts or "").strip()
-    prompts: list[str] = []
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, str):
-                prompts.append(parsed)
-            elif isinstance(parsed, list):
-                prompts.extend(str(item) for item in parsed if str(item))
-        except json.JSONDecodeError:
-            prompts.extend(part.strip() for part in raw.split("|") if part.strip())
-    if not prompts:
-        prompts.append(config.audio_eval_prompt)
-    target = max(1, int(config.eval_audio_samples))
-    while len(prompts) < target:
-        prompts.append(prompts[-1])
-    return prompts[:target]
 
 
 def generate_audio_frames_after_prefix(
@@ -7394,82 +6749,6 @@ def generate_audio_frames_after_prefix(
     return generated, trace, stop_token, stop_reason
 
 
-def generate_audio_eval(
-    model: PropagatorModel,
-    seed: int,
-    out_dir: Path,
-    prompt: str | None = None,
-    sample_idx: int = 0,
-) -> dict[str, Any]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    prompt_text = prompt or config.audio_eval_prompt
-    prompt_ids = encode_text(prompt_text)
-    silence_prefix = [token_ids_silence] * max(0, config.silence_end_tokens) if config.synthesize_turn_silence else []
-    prefix_ids = [
-        token_ids_session,
-        token_ids_user,
-        *prompt_ids,
-        *silence_prefix,
-        token_ids_user_end,
-        token_ids_model,
-        token_ids_audio_out,
-    ]
-
-    generated, trace, stop_token, stop_reason = generate_audio_frames_after_prefix(
-        model,
-        seed,
-        prefix_ids,
-        int(config.eval_audio_tokens),
-    )
-
-    raw_audio, sample_rate, decode_error = decode_audio_token_ids_to_waveform(generated)
-    raw_signal_stats = audio_signal_stats(raw_audio, sample_rate)
-    audio, eval_gain = normalize_audio_for_eval(raw_audio)
-    wav_path = out_dir / f"audio_generation_{sample_idx:02d}.wav"
-    write_wav(wav_path, audio, sample_rate)
-    signal_stats = audio_signal_stats(audio, sample_rate)
-    is_low_rms = raw_signal_stats["rms"] < float(config.audio_low_rms_threshold)
-
-    meta = {
-        "prompt": prompt_text,
-        "sample_idx": sample_idx,
-        "sample_rate": sample_rate,
-        "num_samples": int(audio.shape[-1]),
-        "raw_rms": raw_signal_stats["rms"],
-        "raw_peak": raw_signal_stats["peak"],
-        "eval_gain": eval_gain,
-        "is_low_rms": is_low_rms,
-        **signal_stats,
-        "num_generated_tokens": len(generated),
-        "num_audio_tokens": sum(1 for token_id in generated if is_audio_token_id(token_id)),
-        "stop_reason": stop_reason,
-        "stop_token": token_label(stop_token) if stop_token is not None else None,
-        "eval_audio_seconds": float(config.eval_audio_seconds),
-        "eval_audio_tokens": int(config.eval_audio_tokens),
-        "audio_min_generation_seconds": float(config.audio_min_generation_seconds),
-        "audio_min_generation_tokens": int(config.audio_min_generation_tokens),
-        "decode_error": decode_error,
-        "wav_path": str(wav_path),
-        "trace": trace[:256],
-    }
-    if is_low_rms:
-        log_info(
-            f"[Audio Eval] low raw RMS sample={sample_idx}, raw_rms={raw_signal_stats['rms']:.6f}, "
-            f"raw_peak={raw_signal_stats['peak']:.6f}, gain={eval_gain:.2f}, wav={wav_path}"
-        )
-    (out_dir / f"audio_generation_{sample_idx:02d}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return meta
-
-
-def generate_audio_evals(model: PropagatorModel, seed: int, out_dir: Path) -> list[dict[str, Any]]:
-    metas = [
-        generate_audio_eval(model, seed + idx, out_dir, prompt=prompt, sample_idx=idx)
-        for idx, prompt in enumerate(parse_audio_eval_prompts())
-    ]
-    (out_dir / "audio_generations.json").write_text(json.dumps(metas, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return metas
-
-
 def decode_text_token_ids_for_eval(ids: list[int]) -> str:
     text_ids = [
         int(token_id)
@@ -7480,47 +6759,6 @@ def decode_text_token_ids_for_eval(ids: list[int]) -> str:
     if getattr(config, "asr_eval_case_fold", False):
         text = text.lower()
     return text
-
-
-TASK_ID_TO_NAME = {
-    0: "text",
-    1: "asr",
-    2: "tts",
-    3: "duplex",
-    4: "image",
-}
-
-
-def supervised_content_mask(target_main: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    target_main = np.asarray(target_main, dtype=np.int32)
-    weights = np.asarray(weights, dtype=np.float32)
-    supervised = np.logical_and(weights > 0.0, target_main != int(token_ids_pad))
-    audio_mask = np.logical_and(target_main >= int(audio_token_start), target_main < int(audio_token_end))
-    special_ids = {
-        token_ids_listen,
-        token_ids_user_end,
-        token_ids_user_interrupt,
-        token_ids_model_end,
-        token_ids_session_end,
-        token_ids_text_out,
-        token_ids_audio_out,
-        token_ids_image_out,
-        token_ids_pad,
-    }
-    special_mask = np.isin(target_main, np.asarray(list(special_ids), dtype=np.int32))
-    text_mask = np.logical_and(supervised, np.logical_not(audio_mask))
-    text_mask = np.logical_and(text_mask, np.logical_not(special_mask))
-    return np.logical_or(text_mask, np.logical_and(supervised, audio_mask))
-
-
-def collect_text_tokens_from_positions(tokens: np.ndarray, positions: np.ndarray) -> list[int]:
-    out: list[int] = []
-    flat = np.asarray(tokens, dtype=np.int32).reshape(-1)
-    for pos in np.flatnonzero(np.asarray(positions, dtype=np.bool_)):
-        token_id = int(flat[int(pos)])
-        if 0 <= token_id < text_vocab_size and token_id not in control_token_ids():
-            out.append(token_id)
-    return out
 
 
 def decode_input_text(input_main: list[int]) -> str:
@@ -7536,7 +6774,6 @@ def decode_input_text(input_main: list[int]) -> str:
         token_ids_audio_in,
         token_ids_audio_out,
         token_ids_image_in,
-        token_ids_image_out,
     }
     text_ids: list[int] = []
     for token_id in input_main[start:]:
@@ -7568,18 +6805,24 @@ def validation_source_row(source_idx: int, row_idx: int) -> dict[str, Any] | Non
     spec = dataset_spec_for_source(source_idx)
     if spec is None:
         return None
+    preview_spec = dict(spec)
+    if (
+        str(preview_spec.get("mode", config.dataset_mode)) == "image_recognition"
+        and str(preview_spec.get("name")) not in {"json", "csv", "parquet", "text"}
+    ):
+        preview_spec["streaming"] = True
     split = split_for_dataset_spec(spec, "val")
     try:
-        ds = load_dataset_from_spec(spec, split)
-        ds = apply_same_split_partition(ds, spec, "val", split)
-        ds = apply_data_pack_partition(ds, spec, "val")
-        if split == spec.get("split") and config.validation_skip_rows is not None and hasattr(ds, "skip"):
+        ds = load_dataset_from_spec(preview_spec, split)
+        ds = apply_same_split_partition(ds, preview_spec, "val", split)
+        ds = apply_data_pack_partition(ds, preview_spec, "val")
+        if split == preview_spec.get("split") and config.validation_skip_rows is not None and hasattr(ds, "skip"):
             ds = ds.skip(int(config.validation_skip_rows))
         for row in safe_dataset_iter(
             ds,
             repeat_count=1,
             skip_rows=int(row_idx),
-            skip_log_label=f"EvalPreview:{spec.get('name')}",
+            skip_log_label=f"EvalPreview:{preview_spec.get('name')}",
         ):
             return dict(row)
     except Exception as exc:
@@ -7619,83 +6862,6 @@ def save_processed_image_preview(row: dict[str, Any], spec: dict[str, Any] | Non
         return None
 
 
-def validation_sample_record(
-    sample_idx: int,
-    batch_idx: int,
-    lane_idx: int,
-    chunk_index: int,
-    task_id: int,
-    inputs: np.ndarray,
-    targets: np.ndarray,
-    weights: np.ndarray,
-    preds: np.ndarray,
-    stream_id: int,
-    out_dir: Path,
-) -> dict[str, Any]:
-    input_main = [int(x) for x in np.asarray(inputs, dtype=np.int32)[:, 0].tolist() if int(x) != token_ids_pad]
-    target_main = np.asarray(targets, dtype=np.int32)[:, 0]
-    pred_main = np.asarray(preds, dtype=np.int32)
-    weights_np = np.asarray(weights, dtype=np.float32)
-    content_mask = supervised_content_mask(target_main, weights_np)
-    supervised_mask = np.logical_and(weights_np > 0.0, target_main != int(token_ids_pad))
-    text_positions = np.logical_and(
-        content_mask,
-        np.logical_and(target_main >= 0, target_main < int(text_vocab_size)),
-    )
-    audio_positions = np.logical_and(
-        content_mask,
-        np.logical_and(target_main >= int(audio_token_start), target_main < int(audio_token_end)),
-    )
-    content_total = int(np.sum(content_mask))
-    content_correct = int(np.sum(np.logical_and(content_mask, pred_main == target_main)))
-    supervised_total = int(np.sum(supervised_mask))
-    supervised_correct = int(np.sum(np.logical_and(supervised_mask, pred_main == target_main)))
-    source_idx, source_row_idx = source_info_for_stream_id(stream_id)
-    spec = dataset_spec_for_source(source_idx)
-    task_name = TASK_ID_TO_NAME.get(int(task_id), f"task_{int(task_id)}")
-
-    preview_path = None
-    if task_name == "image" and source_idx is not None and source_row_idx is not None:
-        row = validation_source_row(int(source_idx), int(source_row_idx))
-        if row is not None:
-            preview_path = save_processed_image_preview(
-                row,
-                spec,
-                out_dir,
-                f"validation_image_{sample_idx:02d}_source_{source_idx}_row_{source_row_idx}",
-            )
-
-    return {
-        "sample_idx": int(sample_idx),
-        "batch_idx": int(batch_idx),
-        "lane_idx": int(lane_idx),
-        "chunk_index": int(chunk_index),
-        "stream_id": int(stream_id),
-        "source_idx": source_idx,
-        "source_row_idx": source_row_idx,
-        "dataset": None if spec is None else spec.get("name"),
-        "split": None if spec is None else split_for_dataset_spec(spec, "val"),
-        "mode": None if spec is None else spec.get("mode"),
-        "task_id": int(task_id),
-        "task": task_name,
-        "input_text": decode_input_text(input_main),
-        "has_image_input": bool(any(is_image_token_id(token_id) for token_id in input_main)),
-        "image_token_count": int(sum(1 for token_id in input_main if is_image_token_id(token_id))),
-        "processed_image_path": preview_path,
-        "expected_text": decode_text_token_ids_for_eval(collect_text_tokens_from_positions(target_main, text_positions)),
-        "teacher_forced_top1_text": decode_text_token_ids_for_eval(collect_text_tokens_from_positions(pred_main, text_positions)),
-        "content_correct": content_correct,
-        "content_total": content_total,
-        "content_acc": content_correct / content_total if content_total else None,
-        "supervised_correct": supervised_correct,
-        "supervised_total": supervised_total,
-        "supervised_acc": supervised_correct / supervised_total if supervised_total else None,
-        "expected_audio_tokens": int(np.sum(audio_positions)),
-        "expected_main_tokens": [token_label(int(target_main[pos])) for pos in np.flatnonzero(supervised_mask)[:128]],
-        "teacher_forced_top1_tokens": [token_label(int(pred_main[pos])) for pos in np.flatnonzero(supervised_mask)[:128]],
-    }
-
-
 def collect_audio_target_tokens(target_frames: np.ndarray) -> list[int]:
     audio_ids: list[int] = []
     for frame in np.asarray(target_frames, dtype=np.int32):
@@ -7715,7 +6881,6 @@ def collect_text_targets_after_marker(target_main: list[int], marker: int) -> li
         token_ids_session_end,
         token_ids_audio_out,
         token_ids_text_out,
-        token_ids_image_out,
     }
     out: list[int] = []
     for token_id in target_main[start:]:
@@ -7725,6 +6890,170 @@ def collect_text_targets_after_marker(target_main: list[int], marker: int) -> li
         if token_i not in control_token_ids():
             out.append(token_i)
     return out
+
+
+def parse_eval_dataset_cases() -> list[dict[str, Any]]:
+    raw = str(config.eval_dataset_cases or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    cases: list[dict[str, Any]] = []
+    for idx, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            continue
+        try:
+            source_idx = int(item["source_idx"])
+            row_idx = int(item["row_idx"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if source_idx < 0 or row_idx < 0:
+            continue
+        cases.append(
+            {
+                "name": str(item.get("name") or f"dataset_case_{idx:02d}"),
+                "source_idx": source_idx,
+                "row_idx": row_idx,
+            }
+        )
+    return cases
+
+
+def main_tokens(frames: list[list[int]] | np.ndarray) -> list[int]:
+    arr = np.asarray(frames, dtype=np.int32)
+    if arr.ndim == 1:
+        values = arr.tolist()
+    else:
+        values = arr[:, 0].tolist()
+    return [int(token_id) for token_id in values if int(token_id) != token_ids_pad]
+
+
+def target_audio_token_count(frames: list[list[int]] | np.ndarray) -> int:
+    count = 0
+    for frame in np.asarray(frames, dtype=np.int32).reshape(-1, 8):
+        count += sum(1 for token_id in frame.tolist() if is_audio_token_id(int(token_id)))
+    return count
+
+
+def write_eval_trace(path: Path, record: dict[str, Any]) -> None:
+    lines = [
+        f"name: {record['name']}",
+        f"dataset: {record.get('dataset')}",
+        f"source_idx: {record.get('source_idx')}",
+        f"row_idx: {record.get('row_idx')}",
+        f"mode: {record.get('mode')}",
+        f"input_text: {record.get('input_text')}",
+        f"expected_text: {record.get('expected_text')}",
+        f"generated_text: {record.get('generated_text')}",
+        f"expected_audio_tokens: {record.get('expected_audio_tokens')}",
+        f"generated_audio_tokens: {record.get('generated_audio_tokens')}",
+        f"processed_image_path: {record.get('processed_image_path')}",
+        f"wav_path: {record.get('wav_path')}",
+        "",
+        "trace:",
+        *[str(item) for item in record.get("trace", [])],
+    ]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def generate_fixed_dataset_eval_samples(
+    model: PropagatorModel,
+    seed: int,
+    out_dir: Path,
+) -> list[dict[str, Any]]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+    for idx, case in enumerate(parse_eval_dataset_cases()):
+        source_idx = int(case["source_idx"])
+        row_idx = int(case["row_idx"])
+        spec = dataset_spec_for_source(source_idx)
+        if spec is None:
+            continue
+        row = validation_source_row(source_idx, row_idx)
+        if row is None:
+            continue
+        try:
+            in_ids, tr_ids, row_weights, _ = tokenize_row_by_mode(row, str(spec.get("mode", config.dataset_mode)), spec)
+        except Exception as exc:
+            log_info(
+                f"[Eval Samples] Skipping fixed dataset case {case['name']}: "
+                f"source_idx={source_idx}, row_idx={row_idx}, error={type(exc).__name__}: {exc}"
+            )
+            continue
+        input_main = main_tokens(in_ids)
+        target_main = main_tokens(tr_ids)
+        if token_ids_model not in input_main:
+            continue
+        model_pos = input_main.index(token_ids_model)
+        prefix = input_main[: model_pos + 1]
+        generated, trace = generate_text_after_prefix(model, seed + idx, prefix, int(config.sample_gen_len))
+        expected_text_ids = collect_text_targets_after_marker(target_main, token_ids_text_out)
+        expected_audio_tokens = target_audio_token_count(tr_ids)
+
+        generated_audio_tokens: list[int] = []
+        wav_path: str | None = None
+        audio_decode_error = None
+        if expected_audio_tokens > 0:
+            audio_prefix = [*prefix, token_ids_audio_out]
+            generated_audio_tokens, audio_trace = generate_audio_after_prefix(
+                model,
+                seed + 10_000 + idx,
+                audio_prefix,
+                int(config.eval_audio_tokens),
+            )
+            trace = [*trace[:64], "[AUDIO_OUTPUT]", *audio_trace[:128]]
+            raw_audio, sample_rate, audio_decode_error = decode_audio_token_ids_to_waveform(generated_audio_tokens)
+            audio, _ = normalize_audio_for_eval(raw_audio)
+            wav = out_dir / f"eval_audio_{idx:02d}_{safe_filename(case['name'])}.wav"
+            write_wav(wav, audio, sample_rate)
+            wav_path = str(wav)
+
+        preview_path = None
+        if any(is_image_token_id(token_id) for token_id in input_main):
+            preview_path = save_processed_image_preview(
+                row,
+                spec,
+                out_dir,
+                f"eval_image_{idx:02d}_source_{source_idx}_row_{row_idx}",
+            )
+
+        record = {
+            "sample_idx": idx,
+            "name": case["name"],
+            "source_idx": source_idx,
+            "row_idx": row_idx,
+            "dataset": spec.get("name"),
+            "split": split_for_dataset_spec(spec, "val"),
+            "mode": spec.get("mode"),
+            "input_text": decode_input_text(input_main),
+            "has_image_input": bool(any(is_image_token_id(token_id) for token_id in input_main)),
+            "image_token_count": int(sum(1 for token_id in input_main if is_image_token_id(token_id))),
+            "processed_image_path": preview_path,
+            "expected_text": decode_text_token_ids_for_eval(expected_text_ids),
+            "generated_text": decode_text_token_ids_for_eval(generated),
+            "generated_tokens": [token_label(token_id) for token_id in generated[:128]],
+            "expected_audio_tokens": int(expected_audio_tokens),
+            "generated_audio_tokens": int(sum(1 for token_id in generated_audio_tokens if is_audio_token_id(token_id))),
+            "wav_path": wav_path,
+            "audio_decode_error": audio_decode_error,
+            "trace": trace[:192],
+            "path": str(out_dir / f"eval_sample_{idx:02d}_{safe_filename(case['name'])}.txt"),
+        }
+        write_eval_trace(Path(record["path"]), record)
+        records.append(record)
+
+    artifact = {
+        "kind": "fixed_dataset_eval_samples",
+        "note": "Each sample is generated from a fixed validation dataset source_idx,row_idx pair.",
+        "samples": records,
+    }
+    (out_dir / "eval_samples.json").write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    log_info(f"[Eval Samples] Wrote {len(records)} fixed dataset samples to {out_dir / 'eval_samples.json'}")
+    return records
 
 
 def iter_validation_audio_streams(kind: str, limit: int) -> list[dict[str, Any]]:
@@ -7797,7 +7126,7 @@ def generate_text_after_prefix(
         token_id = sample_model_token_from_logits(logits, subkey, candidate_ids_np, config.eval_use_candidate_head)
         generated.append(token_id)
         trace.append(token_label(token_id))
-        if token_id in {token_ids_model_end, token_ids_session_end, token_ids_audio_out, token_ids_text_out, token_ids_image_out}:
+        if token_id in {token_ids_model_end, token_ids_session_end, token_ids_audio_out, token_ids_text_out}:
             break
         logits, memories, candidate_ids_np = step_runtime(
             model,
@@ -8013,62 +7342,6 @@ def get_batch_by_indices(
 
 def get_chunk_positions_by_indices(positions_arr: np.ndarray, indices: np.ndarray) -> jax.Array:
     return maybe_put_vector(np.asarray(positions_arr[indices], dtype=np.int32), np.int32)
-
-
-def sample_control_indices(total: int, batch_size: int, seed: int) -> np.ndarray:
-    if total <= 0 or batch_size <= 0:
-        return np.zeros((0,), dtype=np.int64)
-    rng = np.random.default_rng(seed)
-    return rng.integers(0, total, size=(batch_size,), dtype=np.int64)
-
-
-def inject_train_control_examples(
-    batch_inputs_np: np.ndarray,
-    batch_targets_np: np.ndarray,
-    batch_weights_np: np.ndarray,
-    reset_mask_np: np.ndarray,
-    chunk_positions_np: np.ndarray,
-    step: int,
-) -> None:
-    if train_control_input_tokens is None or len(train_control_input_tokens) == 0:
-        return
-    rate = max(0.0, min(1.0, float(config.synthetic_control_train_rate)))
-    if rate <= 0.0:
-        return
-    lane_count = int(round(int(config.batch_size) * rate))
-    lane_count = max(1, min(int(config.batch_size), lane_count))
-    indices = sample_control_indices(len(train_control_input_tokens), lane_count, config.seed + 40_000 + int(step))
-    rng = np.random.default_rng(config.seed + 45_000 + int(step))
-    lanes = rng.choice(int(config.batch_size), size=lane_count, replace=False).astype(np.int64)
-    batch_inputs_np[lanes] = np.asarray(train_control_input_tokens[indices], dtype=np.int32)
-    batch_targets_np[lanes] = np.asarray(train_control_target_tokens[indices], dtype=np.int32)
-    batch_weights_np[lanes] = np.asarray(train_control_loss_weights[indices], dtype=np.float32)
-    if train_control_chunk_positions is not None:
-        chunk_positions_np[lanes] = np.asarray(train_control_chunk_positions[indices], dtype=np.int32)
-    else:
-        chunk_positions_np[lanes] = 0
-    reset_mask_np[lanes] = True
-
-
-def get_validation_control_batch(idx: int) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    if val_control_input_tokens is None or len(val_control_input_tokens) == 0:
-        raise ValueError("No validation control chunks are available")
-    indices = sample_control_indices(len(val_control_input_tokens), int(config.batch_size), config.seed + 50_000 + int(idx))
-    batch_inputs = maybe_put_batch(np.asarray(val_control_input_tokens[indices], dtype=np.int32), np.int32)
-    batch_targets = maybe_put_batch(np.asarray(val_control_target_tokens[indices], dtype=np.int32), np.int32)
-    batch_weights = maybe_put_batch(np.asarray(val_control_loss_weights[indices], dtype=np.float32), np.float32)
-    reset_mask = maybe_put_vector(np.ones((int(config.batch_size),), dtype=np.bool_), np.bool_)
-    if val_control_chunk_positions is None:
-        chunk_positions_np = np.zeros((int(config.batch_size),), dtype=np.int32)
-    else:
-        chunk_positions_np = np.asarray(val_control_chunk_positions[indices], dtype=np.int32)
-    chunk_positions = maybe_put_vector(chunk_positions_np, np.int32)
-    if val_control_chunk_task_ids is None:
-        task_ids_np = np.zeros((int(config.batch_size),), dtype=np.int32)
-    else:
-        task_ids_np = np.asarray(val_control_chunk_task_ids[indices], dtype=np.int32)
-    task_ids = maybe_put_vector(task_ids_np, np.int32)
-    return batch_inputs, batch_targets, batch_weights, reset_mask, chunk_positions, task_ids
 
 
 def get_random_batch(step_index: int, shuffled_indices: np.ndarray) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -8304,147 +7577,6 @@ def validation_composite_score(metrics: dict[str, float]) -> dict[str, float]:
     }
 
 
-def save_validation_prediction_samples(
-    model: PropagatorModel,
-    step: int,
-    out_dir: Path,
-    validation_prediction_step_fn: Any,
-) -> list[dict[str, Any]]:
-    limit = max(0, int(config.eval_validation_samples))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if limit <= 0:
-        (out_dir / "validation_samples.json").write_text("[]\n", encoding="utf-8")
-        return []
-
-    selected: list[dict[str, Any]] = []
-    overflow: list[dict[str, Any]] = []
-    task_counts: dict[int, int] = {}
-    per_task_target = max(1, int(math.ceil(limit / max(1, len(TASK_ID_TO_NAME)))))
-
-    def maybe_add(record: dict[str, Any]) -> None:
-        task_id = int(record["task_id"])
-        if len(selected) < limit and task_counts.get(task_id, 0) < per_task_target:
-            selected.append(record)
-            task_counts[task_id] = task_counts.get(task_id, 0) + 1
-        else:
-            overflow.append(record)
-
-    if config.stateful_validation:
-        sampler = StatefulChunkSampler(
-            val_stream_ids,
-            config.batch_size,
-            config.seed + 10_000,
-            source_weights=[float(spec["weight"]) for spec in parse_dataset_mix()],
-        )
-        memories = initial_memories_for_training(model, config.batch_size)
-
-        for batch_idx in range(int(config.validation_batches)):
-            indices, reset_mask_np = sampler.next_indices()
-            batch_inputs_np = np.asarray(val_input_tokens[indices], dtype=np.int32)
-            batch_targets_np = np.asarray(val_target_tokens[indices], dtype=np.int32)
-            batch_weights_np = np.asarray(val_loss_weights[indices], dtype=np.float32)
-            chunk_positions_np = np.asarray(val_chunk_positions[indices], dtype=np.int32)
-            task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
-
-            preds, memories = run_validation_prediction_step(
-                validation_prediction_step_fn,
-                model,
-                maybe_put_batch(batch_inputs_np, np.int32),
-                maybe_put_batch(batch_targets_np, np.int32),
-                memories,
-                maybe_put_vector(reset_mask_np, np.bool_),
-                maybe_put_vector(chunk_positions_np, np.int32),
-            )
-            preds_np = np.asarray(jax.device_get(preds), dtype=np.int32)
-
-            for lane_idx, chunk_index in enumerate(indices.tolist()):
-                if len(selected) >= limit and len(overflow) >= limit:
-                    break
-                if not np.any(batch_weights_np[lane_idx] > 0.0):
-                    continue
-                maybe_add(
-                    validation_sample_record(
-                        len(selected) + len(overflow),
-                        batch_idx,
-                        lane_idx,
-                        int(chunk_index),
-                        int(task_ids_np[lane_idx]),
-                        batch_inputs_np[lane_idx],
-                        batch_targets_np[lane_idx],
-                        batch_weights_np[lane_idx],
-                        preds_np[lane_idx],
-                        int(val_stream_ids[int(chunk_index)]),
-                        out_dir,
-                    )
-                )
-            if len(selected) >= limit and len(overflow) >= limit:
-                break
-    else:
-        for batch_idx in range(int(config.validation_batches)):
-            indices = validation_indices_for_batch(batch_idx)
-            batch_inputs_np = np.asarray(val_input_tokens[indices], dtype=np.int32)
-            batch_targets_np = np.asarray(val_target_tokens[indices], dtype=np.int32)
-            batch_weights_np = np.asarray(val_loss_weights[indices], dtype=np.float32)
-            chunk_positions_np = np.asarray(val_chunk_positions[indices], dtype=np.int32)
-            task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
-            memories = initial_memories_for_training(model, config.batch_size)
-            reset_mask_np = np.ones((int(config.batch_size),), dtype=np.bool_)
-
-            preds, _ = run_validation_prediction_step(
-                validation_prediction_step_fn,
-                model,
-                maybe_put_batch(batch_inputs_np, np.int32),
-                maybe_put_batch(batch_targets_np, np.int32),
-                memories,
-                maybe_put_vector(reset_mask_np, np.bool_),
-                maybe_put_vector(chunk_positions_np, np.int32),
-            )
-            preds_np = np.asarray(jax.device_get(preds), dtype=np.int32)
-
-            for lane_idx, chunk_index in enumerate(indices.tolist()):
-                if len(selected) >= limit and len(overflow) >= limit:
-                    break
-                if not np.any(batch_weights_np[lane_idx] > 0.0):
-                    continue
-                maybe_add(
-                    validation_sample_record(
-                        len(selected) + len(overflow),
-                        batch_idx,
-                        lane_idx,
-                        int(chunk_index),
-                        int(task_ids_np[lane_idx]),
-                        batch_inputs_np[lane_idx],
-                        batch_targets_np[lane_idx],
-                        batch_weights_np[lane_idx],
-                        preds_np[lane_idx],
-                        int(val_stream_ids[int(chunk_index)]),
-                        out_dir,
-                    )
-                )
-            if len(selected) >= limit and len(overflow) >= limit:
-                break
-
-    while len(selected) < limit and overflow:
-        selected.append(overflow.pop(0))
-    selected = selected[:limit]
-    for idx, record in enumerate(selected):
-        record["sample_idx"] = idx
-
-    artifact = {
-        "step": int(step),
-        "kind": "teacher_forced_validation_samples",
-        "note": (
-            "Samples are selected from the same validation sampler used for metrics. "
-            "Predictions are per-target top-1 under teacher forcing, not free-running generation."
-        ),
-        "samples": selected,
-    }
-    path = out_dir / "validation_samples.json"
-    path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    log_info(f"[Validation Samples] Wrote {len(selected)} teacher-forced samples to {path}")
-    return selected
-
-
 def run_validation(
     model: PropagatorModel,
     step: int,
@@ -8507,28 +7639,6 @@ def run_validation(
             task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
             task_ids = maybe_put_vector(task_ids_np, np.int32)
 
-            ce_loss, _, metrics = run_validation_step_stateful(
-                validation_step_stateful_fn,
-                model,
-                batch_inputs,
-                batch_targets,
-                batch_weights,
-                memories,
-                reset_mask,
-                chunk_positions,
-                task_ids,
-            )
-            losses.append(float(ce_loss))
-            metric_sums += np.asarray([float(jax.device_get(x)) for x in metrics], dtype=np.float64)
-
-    if (
-        val_control_input_tokens is not None
-        and len(val_control_input_tokens) > 0
-        and int(config.validation_control_batches) > 0
-    ):
-        for i in range(int(config.validation_control_batches)):
-            batch_inputs, batch_targets, batch_weights, reset_mask, chunk_positions, task_ids = get_validation_control_batch(step + i)
-            memories = initial_memories_for_training(model, config.batch_size)
             ce_loss, _, metrics = run_validation_step_stateful(
                 validation_step_stateful_fn,
                 model,
@@ -9206,7 +8316,7 @@ def init_global_token_ids() -> None:
     global token_ids_pad, token_ids_unk, token_ids_session, token_ids_user, token_ids_model
     global token_ids_listen, token_ids_user_end, token_ids_model_end, token_ids_session_end, token_ids_user_interrupt
     global token_ids_audio_in, token_ids_audio_out, token_ids_silence, token_ids_text_in, token_ids_text_out
-    global token_ids_image_in, token_ids_image_out
+    global token_ids_image_in
 
     token_ids_pad = token_ids["pad"]
     token_ids_unk = token_ids["unk"]
@@ -9224,20 +8334,60 @@ def init_global_token_ids() -> None:
     token_ids_text_in = token_ids["text_in"]
     token_ids_text_out = token_ids["text_out"]
     token_ids_image_in = token_ids["image_in"]
-    token_ids_image_out = token_ids["image_out"]
+
+
+def initialize_tokenizer_runtime() -> None:
+    global tokenizer, token_ids, text_vocab_size, vocab_size, audio_token_start, audio_token_end
+    global image_token_start, image_token_end, tokenizer_fingerprint
+    global candidate_token_ids_host, audio_candidate_token_ids_host
+
+    tokenizer = load_or_train_tokenizer()
+    token_ids = ensure_special_tokens(tokenizer)
+    text_vocab_size = tokenizer.get_vocab_size()
+    vocab_size, audio_token_start, audio_token_end, image_token_start, image_token_end = compute_vocab_sizes(text_vocab_size)
+    tokenizer_fingerprint = tokenizer_file_fingerprint(Path(config.tokenizer_path))
+    init_global_token_ids()
+    configure_runtime_environment()
+    candidate_token_ids_host = build_candidate_token_ids(vocab_size)
+    audio_candidate_token_ids_host = build_audio_candidate_token_ids()
+
+
+def run_eval_only() -> None:
+    global config
+
+    if not config.eval_only_checkpoint:
+        return
+    initialize_tokenizer_runtime()
+    output_root = Path(config.output_root)
+    model = PropagatorModel(config, vocab_size, nnx.Rngs(config.seed))
+    if int(config.batch_size) <= 0:
+        config = config.model_copy(update={"batch_size": choose_auto_batch_size(model)})
+    elif len(jax.devices()) > 1 and config.enable_data_sharding and int(config.batch_size) % len(jax.devices()) != 0:
+        adjusted = int(math.ceil(int(config.batch_size) / len(jax.devices())) * len(jax.devices()))
+        log_info(f"[Batch] Adjusting batch_size from {config.batch_size} to {adjusted} for {len(jax.devices())} devices")
+        config = config.model_copy(update={"batch_size": adjusted})
+    optimizer = nnx.Optimizer(model, build_optimizer(max(1, int(config.max_steps) or 1)), wrt=nnx.Param)
+    checkpointer = ocp.StandardCheckpointer()
+    checkpoint_path = Path(config.eval_only_checkpoint)
+    log_info(f"[Eval Only] Restoring checkpoint from {checkpoint_path}")
+    restored_kind = restore_training_checkpoint(checkpointer, checkpoint_path, model, optimizer)
+    log_info(f"[Eval Only] Restored {restored_kind}")
+    eval_out_dir = Path(config.eval_only_output_dir) if config.eval_only_output_dir else output_root / "fixed_eval"
+    generate_fixed_dataset_eval_samples(model, config.seed + 60_000, eval_out_dir)
+    log_info(f"[Eval Only] Done: {eval_out_dir}")
 
 
 def main() -> None:
     global config, train_input_tokens, train_target_tokens, train_loss_weights, train_stream_ids, train_chunk_positions
     global val_input_tokens, val_target_tokens, val_loss_weights, val_stream_ids, val_chunk_positions, val_chunk_task_ids
-    global train_control_input_tokens, train_control_target_tokens, train_control_loss_weights, train_control_stream_ids
-    global train_control_chunk_positions, train_control_chunk_task_ids
-    global val_control_input_tokens, val_control_target_tokens, val_control_loss_weights, val_control_stream_ids
-    global val_control_chunk_positions, val_control_chunk_task_ids
     global candidate_token_ids_host, audio_candidate_token_ids_host
 
     log_info(f"[{datetime.now().isoformat()}] Main started. Initializing config and tokenization...")
     config = build_config()
+    if config.eval_only_checkpoint:
+        run_eval_only()
+        return
+
     install_signal_handlers()
     acquire_run_lock()
 
@@ -9262,38 +8412,6 @@ def main() -> None:
     ) = loaded
     init_global_token_ids()
     val_chunk_task_ids = build_chunk_task_ids(val_input_tokens, val_target_tokens, val_stream_ids)
-    (
-        train_control_input_tokens,
-        train_control_target_tokens,
-        train_control_loss_weights,
-        train_control_stream_ids,
-        train_control_chunk_positions,
-    ) = build_synthetic_control_chunks(
-        "train",
-        int(config.synthetic_control_train_examples),
-        9_000_000_000,
-    )
-    train_control_chunk_task_ids = build_chunk_task_ids(
-        train_control_input_tokens,
-        train_control_target_tokens,
-        train_control_stream_ids,
-    )
-    (
-        val_control_input_tokens,
-        val_control_target_tokens,
-        val_control_loss_weights,
-        val_control_stream_ids,
-        val_control_chunk_positions,
-    ) = build_synthetic_control_chunks(
-        "val",
-        int(config.synthetic_control_val_examples),
-        9_100_000_000,
-    )
-    val_control_chunk_task_ids = build_chunk_task_ids(
-        val_control_input_tokens,
-        val_control_target_tokens,
-        val_control_stream_ids,
-    )
 
     candidate_token_ids_host = build_candidate_token_ids(vocab_size)
     audio_candidate_token_ids_host = build_audio_candidate_token_ids()
@@ -9451,7 +8569,6 @@ def main() -> None:
 
     train_step_stateful_fn = build_train_step_stateful()
     validation_step_stateful_fn = build_validation_step_stateful()
-    validation_prediction_step_fn = build_validation_prediction_step()
 
     pbar = progress_bar(range(start_step, total_steps), desc="Training", initial=start_step, total=total_steps)
     train_wall_start = time.time()
@@ -9474,14 +8591,6 @@ def main() -> None:
             batch_targets_np = np.asarray(train_target_tokens[indices], dtype=np.int32).copy()
             batch_weights_np = np.asarray(train_loss_weights[indices], dtype=np.float32).copy()
             chunk_positions_np = np.asarray(train_chunk_positions[indices], dtype=np.int32).copy()
-            inject_train_control_examples(
-                batch_inputs_np,
-                batch_targets_np,
-                batch_weights_np,
-                reset_mask_np,
-                chunk_positions_np,
-                step,
-            )
             batch_inputs = maybe_put_batch(batch_inputs_np, np.int32)
             batch_targets = maybe_put_batch(batch_targets_np, np.int32)
             batch_weights = maybe_put_batch(batch_weights_np, np.float32)
@@ -9584,7 +8693,6 @@ def main() -> None:
                     if (not is_jit_sharding_error) or attempt == 1:
                         raise
                     validation_step_stateful_fn = build_validation_step_stateful()
-                    validation_prediction_step_fn = build_validation_prediction_step()
                     log_info(
                         f"[Validation] Retrying stateful validation at global step {act_step} after jit sharding mismatch "
                         f"#{attempt + 1}: {msg.splitlines()[0]}"
@@ -9677,11 +8785,10 @@ def main() -> None:
                 act_step,
             )
 
-            validation_samples = save_validation_prediction_samples(
+            validation_samples = generate_fixed_dataset_eval_samples(
                 model,
-                act_step,
+                config.seed + 60_000,
                 out_dir,
-                validation_prediction_step_fn,
             )
 
             (out_dir / "validation_metrics.json").write_text(

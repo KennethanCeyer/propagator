@@ -21,7 +21,7 @@ The current experimental run is a multimodal duplex model trained on text dialog
 
 ## Current Snapshot
 
-The active 1B run was restarted from scratch after the size correction. The plots and tables below are from the previous 586M archive at step 1,020,000, so keep them separate from the new 1B checkpoint line.
+The active 1B run is separate from the archive shown below. The plots, metrics, and examples in this README are from the previous 586M archive at step 1,000,000.
 
 | Item | Value |
 | :--- | :--- |
@@ -37,6 +37,8 @@ The active 1B run was restarted from scratch after the size correction. The plot
 | Optimizer | AdamW, peak LR 1e-4, 5k warmup, 0.01 weight decay in the corrective training script |
 
 The run is still a research prototype. Turn-taking and output-mode control are already learnable, but generated language quality is uneven and exact audio-codebook accuracy remains low.
+
+For the 1B line, the next target is to keep the same fixed validation examples while scaling capacity. Distillation should come after the larger run has stable protocol behavior, using the 1B model as a teacher for a smaller edge-oriented checkpoint.
 
 ## Training Data
 
@@ -221,7 +223,6 @@ The architecture handles incoming user speech while managing the response state 
 | [IMAGE_INPUT] | Image input segment | Marks visual tokens supplied by the user |
 | [TEXT_OUTPUT] | Text output segment | Declares that the next response segment is text |
 | [AUDIO_OUTPUT] | Audio output segment | Declares that the next response segment is audio codec tokens |
-| [IMAGE_OUTPUT] | Image output segment | Reserved for generated visual-token segments |
 
 The multimodal training protocol covers Text->Text, Audio->Text, Image->Text, Text->Audio, Audio->Audio, and sequential mixed-output supervision. Mixed-output rows are represented as ordered output segments, for example `[TEXT_OUTPUT]` followed by text content and then `[AUDIO_OUTPUT]` followed by audio codec frames. There is no separate hybrid token; output composition is expressed by segment order.
 
@@ -270,25 +271,25 @@ The reported CE is a weighted multimodal objective, not a plain text perplexity.
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Previous 586M-run eval retained for comparison, completed at step 1,020,000:
+Previous 586M-run eval retained for comparison, completed at step 1,000,000:
 
 | Metric | Value |
 | :--- | ---: |
-| Train weighted CE | 2.64 |
-| Validation weighted CE | 2.27 |
-| Validation composite score | 0.679 |
-| Decision accuracy | 96.52% |
-| Listen accuracy | 96.46% |
-| User-end accuracy | 97.51% |
-| Model-end accuracy | 73.08% |
+| Train weighted CE | 2.65 |
+| Validation weighted CE | 2.31 |
+| Validation composite score | 0.683 |
+| Decision accuracy | 96.96% |
+| Listen accuracy | 96.92% |
+| User-end accuracy | 97.35% |
+| Model-end accuracy | 77.79% |
 | Text token accuracy | 71.27% |
-| Audio token accuracy | 48.31% |
-| Audio codebook exact accuracy | 0.78% |
-| Audio auxiliary token accuracy | 12.46% |
+| Audio token accuracy | 47.99% |
+| Audio codebook exact accuracy | 0.80% |
+| Audio auxiliary token accuracy | 12.38% |
 | ASR task accuracy | 74.51% |
-| Duplex task accuracy | 51.01% |
-| Image task accuracy | 67.73% |
-| Image task CE | 0.272 |
+| Duplex task accuracy | 50.73% |
+| Image task accuracy | 69.64% |
+| Image task CE | 0.260 |
 
 ### Protocol and Modality
 
@@ -316,26 +317,29 @@ Validation metrics are teacher-forced measurements on held-out dataset pairs. Fr
 
 ## Output Examples
 
-These examples are from the previous 586M run's step 1,020,000 runtime loop and are kept only as qualitative protocol traces.
+These examples are fixed held-out dataset rows from the previous 586M run at step 1,000,000. The source ids are stored in [`assets/eval_samples.json`](assets/eval_samples.json).
 
-| Probe | Input | Model output |
-| :--- | :--- | :--- |
-| Identity | `What` + `is your name?` | `I'm Propagator.` |
-| Format following | `Answer with one word:` + `is water wet?` | `No.` |
-| Turn boundary | user speech followed by `[USER_END]` | switches to `[MODEL]` then `[TEXT_OUTPUT]` |
-| Interruption-like input | user continues speaking without `[USER_END]` | response stream is not started |
+| ID | Dataset row | Input | Expected | Model output |
+| :--- | :--- | :--- | :--- | :--- |
+| `text_dolly_000032` | `source_idx=4,row_idx=32` | `what is the trans tahoe relay?` | Race across Lake Tahoe, run as a six-person relay. | `tahoe is a street...` |
+| `text_dolly_000033` | `source_idx=4,row_idx=33` | `how has the video gaming industry evolved over the years ?` | Summary of PC, console, mobile, streaming, and e-sports growth. | empty response |
 
-| Audio prompt | Rendered sample | Notes |
-| :--- | :---: | :--- |
-| `Say this aloud: the code word is amber.` | <audio controls src="assets/audio_generation_00.wav"></audio><br/>[WAV](assets/audio_generation_00.wav) | 2.00s, 24 kHz |
-| `Read this number sequence aloud: two, seven, four.` | <audio controls src="assets/audio_generation_01.wav"></audio><br/>[WAV](assets/audio_generation_01.wav) | 1.36s, 24 kHz |
+| ID | Image | Question | Expected | Model output |
+| :--- | :---: | :--- | :--- | :--- |
+| `image_vqav2_000000` | <img src="assets/eval_image_vqav2_000000_160px.png" width="160" alt="VQAv2 row 0 processed at 160px" /> | `where is he looking?` | `down` | `middle` |
+| `image_vqav2_000001` | <img src="assets/eval_image_vqav2_000001_160px.png" width="160" alt="VQAv2 row 1 processed at 160px" /> | `what are the people in the background doing?` | `watching` | empty response |
+
+| ID | Input | Target | Rendered output |
+| :--- | :--- | :--- | :---: |
+| `audio_libritts_000004` | `say this aloud: what do you make of it, gryce?"` | 192 Mimi target tokens | <audio controls src="assets/eval_audio_libritts_000004.wav"></audio><br/>[WAV](assets/eval_audio_libritts_000004.wav) |
+| `audio_librispeech_000007` | `say this aloud: painting he tells us is of a different quality...` | 928 Mimi target tokens | <audio controls src="assets/eval_audio_librispeech_000007.wav"></audio><br/>[WAV](assets/eval_audio_librispeech_000007.wav) |
 
 ### Interpretation
 
 - Session management: `[SESSION]` initializes the memory matrix for each interaction.
 - Listening: the model targets `[LISTEN]` during user input to update the matrix without output.
 - Turn-taking: `[USER_END]` triggers the switch from writing/listening to response mode.
-- Response mode: `[MODEL]` is followed by an ordered output segment such as `[TEXT_OUTPUT]`, `[AUDIO_OUTPUT]`, or `[IMAGE_OUTPUT]`. Multi-output responses concatenate these segment markers in generation order.
+- Response mode: `[MODEL]` is followed by an ordered output segment such as `[TEXT_OUTPUT]` or `[AUDIO_OUTPUT]`. Image rows are evaluated as visual input followed by text output.
 - Current limitation: control tokens are learning faster than high-quality long-form generation.
 
 ## Setup and Execution

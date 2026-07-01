@@ -37,18 +37,6 @@ def initialize_globals(cfg: train.PropagatorConfig) -> None:
     train.init_global_token_ids()
 
 
-def check_control_examples() -> None:
-    rows = train.synthetic_control_rows(24, split_name="train")
-    matching = [
-        row
-        for row in rows
-        if row["output"][0]["content"] == "What is your name?"
-    ]
-    assert matching, "identity control example is missing"
-    for row in matching:
-        assert "Propagator" in row["output"][1]["content"]
-
-
 def check_weighted_sampler() -> None:
     stream_ids = np.asarray(
         [
@@ -100,13 +88,15 @@ def check_tiny_multimodal_forward(cfg: train.PropagatorConfig) -> None:
     targets[:, 1, 0] = train.token_ids_audio_out
     weights[:, 1] = 1.0
 
+    frame = []
     for codebook in range(cfg.audio_codebooks):
-        token = train.audio_token_id(codebook, codebook % cfg.audio_codebook_size)
-        inputs[:, 2, codebook] = token
-        targets[:, 2, codebook] = token
+        frame.append(train.audio_token_id(codebook, codebook % cfg.audio_codebook_size))
+
+    inputs[:, 2, 0] = train.token_ids_audio_out
+    targets[:, 2, :] = np.asarray(frame, dtype=np.int32)
     weights[:, 2] = 1.0
 
-    inputs[:, 3, 0] = train.token_ids_audio_end
+    inputs[:, 3, :] = np.asarray(frame, dtype=np.int32)
     targets[:, 3, 0] = train.token_ids_model_end
     weights[:, 3] = 1.0
 
@@ -176,7 +166,9 @@ def check_tiny_multimodal_forward(cfg: train.PropagatorConfig) -> None:
         assert [train.audio_code_from_token_id(token)[0] for token in frame_tokens] == list(range(cfg.audio_codebooks))
 
     optimizer = nnx.Optimizer(model, train.build_optimizer(total_steps=20), wrt=nnx.Param)
-    train_loss, final_memories = train.train_step_stateful(
+    train_step_stateful = train.build_train_step_stateful()
+    train_loss, final_memories = train.call_train_step_stateful(
+        train_step_stateful,
         model,
         optimizer,
         jnp.asarray(inputs.copy()),
@@ -204,9 +196,7 @@ def main() -> None:
         eval_use_candidate_head=False,
     )
     initialize_globals(cfg)
-    assert len(train.parse_eval_text_cases()) >= 8
     assert cfg.eval_use_candidate_head is False
-    check_control_examples()
     check_weighted_sampler()
     check_plain_text_continuation()
     check_tiny_multimodal_forward(cfg)

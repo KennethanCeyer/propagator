@@ -18,23 +18,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import types
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = REPO_ROOT / "data" / "regression" / "sample_05_format_following.jsonl"
-DEFAULT_TOKENIZER = REPO_ROOT / "outputs" / "propagator-multimodal" / "tokenizer.with_protocol_tokens.json"
-DEFAULT_POSTTRAIN = REPO_ROOT / "data" / "propagator_posttrain_10k.jsonl"
+DEFAULT_TOKENIZER = REPO_ROOT / "outputs" / "propagator-multimodal_1b" / "tokenizer.with_protocol_tokens.json"
+DEFAULT_POSTTRAIN = REPO_ROOT / "data" / "datasets" / "propagator_posttrain_cleaned.jsonl"
 DEFAULT_TRAIN_META = Path("/mnt/disks/propagator-cache/cache/propagator_train_fe55d3fdb5.meta.json")
 DEFAULT_VAL_META = Path("/mnt/disks/propagator-cache/cache/propagator_val_2fc7bd25f3.meta.json")
-DEFAULT_GENERATED_SAMPLE = REPO_ROOT / "outputs" / "propagator-multimodal" / "step_300000" / "sample_05_format_following.txt"
-DEFAULT_VAL_METRICS = REPO_ROOT / "outputs" / "propagator-multimodal" / "step_300000" / "validation_metrics.json"
-DEFAULT_RUN_CONFIG = REPO_ROOT / "outputs" / "propagator-multimodal" / "run_config.json"
-DEFAULT_MIX_FILE = REPO_ROOT / "data" / "propagator_dataset_mix.json"
+DEFAULT_GENERATED_SAMPLE = REPO_ROOT / "outputs" / "propagator-multimodal_1b" / "step_300000" / "sample_05_format_following.txt"
+DEFAULT_VAL_METRICS = REPO_ROOT / "outputs" / "propagator-multimodal_1b" / "step_300000" / "validation_metrics.json"
+DEFAULT_RUN_CONFIG = REPO_ROOT / "outputs" / "propagator-multimodal_1b" / "run_config.json"
+DEFAULT_MIX_FILE = REPO_ROOT / "data" / "mixes" / "propagator_dataset_mix.json"
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -73,6 +76,7 @@ def normalize_text(text: str) -> str:
 
 
 def import_train_module() -> Any:
+    os.environ.setdefault("SLACK_LOG_ENABLED", "0")
     sys.path.insert(0, str(REPO_ROOT))
     try:
         import train  # type: ignore
@@ -97,25 +101,26 @@ def init_train_protocol_globals(train: Any, tokenizer_path: Path) -> None:
         silence_end_tokens=0,
         enable_audio=False,
         audio_out_loss_weight=2.0,
-        audio_end_loss_weight=2.0,
         output_modality_loss_weight=2.0,
-        text_out_loss_weight=2.0,
-        hybrid_out_loss_weight=2.0,
         image_recognition_only=True,
         image_input_resolution=160,
         image_max_input_resolution=192,
         image_patch_size=16,
+        image_patch_vocab_size=1024,
+        image_tokens_per_sample=64,
+        tokenizer_path=str(tokenizer_path),
     )
     train.tokenizer = train.Tokenizer.from_file(str(tokenizer_path))
-    missing = [tok for tok in train.SPECIAL_TOKENS if train.tokenizer.token_to_id(tok) is None]
-    if missing:
-        train.tokenizer.add_special_tokens(missing)
-    train.token_ids = {}
-    for tok in train.SPECIAL_TOKENS:
-        idx = train.tokenizer.token_to_id(tok)
-        if idx is None:
-            raise SystemExit(f"Failed to register special token in memory: {tok}")
-        train.token_ids[tok.strip("[]").lower()] = int(idx)
+    train.token_ids = train.ensure_special_tokens(train.tokenizer)
+    train.text_vocab_size = train.tokenizer.get_vocab_size()
+    (
+        train.vocab_size,
+        train.audio_token_start,
+        train.audio_token_end,
+        train.image_token_start,
+        train.image_token_end,
+    ) = train.compute_vocab_sizes(train.text_vocab_size)
+    train.init_global_token_ids()
 
 
 def token_name_map(train: Any) -> tuple[dict[str, int], dict[int, str]]:
@@ -150,7 +155,7 @@ def assert_protocol_row(train: Any, row: dict[str, Any], unroll_len: int) -> dic
 
     require(len(user_end_targets) == 1, f"expected one [USER_END] target, got {len(user_end_targets)}")
     require(len(model_end_targets) == 1, f"expected one [MODEL_END] target, got {len(model_end_targets)}")
-    require(len(text_out_targets) == 1, f"expected one [TEXT_OUT] target, got {len(text_out_targets)}")
+    require(len(text_out_targets) == 1, f"expected one [TEXT_OUTPUT] target, got {len(text_out_targets)}")
 
     user_end_idx = user_end_targets[0]
     model_idx = user_end_idx + 1
@@ -160,12 +165,12 @@ def assert_protocol_row(train: Any, row: dict[str, Any], unroll_len: int) -> dic
     require(all(y == ids["listen"] for y in y_main[1:user_end_idx]), "user phase must target [LISTEN]")
     require(x_main[model_idx] == ids["user_end"], "[USER_END] input must follow final user token")
     require(y_main[model_idx] == ids["model"], "[USER_END] target must be [MODEL]")
-    require(x_main[text_out_idx] == ids["model"], "[MODEL] input must target [TEXT_OUT]")
+    require(x_main[text_out_idx] == ids["model"], "[MODEL] input must target [TEXT_OUTPUT]")
     require(text_out_idx == model_idx + 1, "[MODEL] transition must immediately follow [USER_END]")
-    require(model_end_idx > text_out_idx, "[MODEL_END] target must follow [TEXT_OUT]")
+    require(model_end_idx > text_out_idx, "[MODEL_END] target must follow [TEXT_OUTPUT]")
     require(float(ws[user_end_idx]) > 0.0, "final user token -> [USER_END] must be supervised")
     require(float(ws[model_idx]) > 0.0, "[USER_END] -> [MODEL] must be supervised")
-    require(float(ws[text_out_idx]) > 0.0, "[MODEL] -> [TEXT_OUT] must be supervised")
+    require(float(ws[text_out_idx]) > 0.0, "[MODEL] -> [TEXT_OUTPUT] must be supervised")
     require(float(ws[model_end_idx]) > 0.0, "answer -> [MODEL_END] must be supervised")
 
     control_ids = {
@@ -181,11 +186,9 @@ def assert_protocol_row(train: Any, row: dict[str, Any], unroll_len: int) -> dic
         ids["audio_in"],
         ids.get("image_in", -1),
         ids["audio_out"],
-        ids["audio_end"],
         ids["silence"],
         ids["text_in"],
         ids["text_out"],
-        ids["hybrid_out"],
     }
     answer_ids: list[int] = []
     for y in y_main[text_out_idx:model_end_idx]:
@@ -247,7 +250,7 @@ def run_audio_alignment_check(args: argparse.Namespace) -> bool:
     user_ids = [ids["text_in"], *train.encode_text("Say yes as speech.")]
     audio_frame_0 = [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007]
     audio_frame_1 = [1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017]
-    model_ids = [ids["audio_out"], audio_frame_0, audio_frame_1, ids["audio_end"]]
+    model_ids = [ids["audio_out"], audio_frame_0, audio_frame_1]
     xs, ys, ws, meta = train.tokenize_modal_exchange(user_ids, model_ids)
     x_main = [main_token(x) for x in xs]
     y_main = [main_token(y) for y in ys]
@@ -257,24 +260,21 @@ def run_audio_alignment_check(args: argparse.Namespace) -> bool:
             raise AssertionError(f"audio_alignment: {message}")
 
     audio_out_targets = [i for i, y in enumerate(y_main) if y == ids["audio_out"]]
-    audio_end_targets = [i for i, y in enumerate(y_main) if y == ids["audio_end"]]
     model_end_targets = [i for i, y in enumerate(y_main) if y == ids["model_end"]]
-    require(len(audio_out_targets) == 1, f"expected one [AUDIO_OUT] target, got {len(audio_out_targets)}")
-    require(len(audio_end_targets) == 1, f"expected one [AUDIO_END] target, got {len(audio_end_targets)}")
+    require(len(audio_out_targets) == 1, f"expected one [AUDIO_OUTPUT] target, got {len(audio_out_targets)}")
     require(len(model_end_targets) == 1, f"expected one [MODEL_END] target, got {len(model_end_targets)}")
     audio_out_idx = audio_out_targets[0]
-    require(x_main[audio_out_idx] == ids["model"], "[MODEL] input must target [AUDIO_OUT]")
-    require(float(ws[audio_out_idx]) == 2.0, "[MODEL] -> [AUDIO_OUT] should use audio_out_loss_weight=2.0")
+    require(x_main[audio_out_idx] == ids["model"], "[MODEL] input must target [AUDIO_OUTPUT]")
+    require(float(ws[audio_out_idx]) == 2.0, "[MODEL] -> [AUDIO_OUTPUT] should use audio_out_loss_weight=2.0")
     require(list(ys[audio_out_idx + 1]) == audio_frame_0, "first audio frame q0-q7 target was not preserved")
     require(list(ys[audio_out_idx + 2]) == audio_frame_1, "second audio frame q0-q7 target was not preserved")
     require(list(xs[audio_out_idx + 2]) == audio_frame_0, "teacher-forced previous audio frame input was not preserved")
-    require(y_main[audio_out_idx + 3] == ids["audio_end"], "last audio frame must target [AUDIO_END]")
-    require(y_main[audio_out_idx + 4] == ids["model_end"], "[AUDIO_END] must target [MODEL_END]")
+    require(y_main[audio_out_idx + 3] == ids["model_end"], "last audio frame must target [MODEL_END]")
     print(
         "[audio][OK] "
         f"frames=2 audio_out_index={audio_out_idx} "
         f"audio_out_weight={float(ws[audio_out_idx])} "
-        f"audio_end_weight={float(ws[audio_out_idx + 3])} meta={meta}"
+        f"model_end_weight={float(ws[audio_out_idx + 3])} meta={meta}"
     )
     return True
 
@@ -284,7 +284,7 @@ def run_image_protocol_check(args: argparse.Namespace) -> bool:
     init_train_protocol_globals(train, args.tokenizer)
     ids, _ = token_name_map(train)
     if "image_in" not in ids:
-        raise AssertionError("image_protocol: [IMAGE_IN] is not registered as a special token")
+        raise AssertionError("image_protocol: [IMAGE_INPUT] is not registered as a special token")
 
     user_ids = [
         ids["image_in"],
@@ -302,17 +302,38 @@ def run_image_protocol_check(args: argparse.Namespace) -> bool:
             raise AssertionError(f"image_protocol: {message}")
 
     image_positions = [i for i, x in enumerate(x_main) if x == ids["image_in"]]
-    require(len(image_positions) == 1, f"expected one [IMAGE_IN] input, got {len(image_positions)}")
+    require(len(image_positions) == 1, f"expected one [IMAGE_INPUT] input, got {len(image_positions)}")
     image_idx = image_positions[0]
-    require(y_main[image_idx] == ids["listen"], "[IMAGE_IN] must be user-context input targeting [LISTEN]")
-    require(float(ws[image_idx]) > 0.0, "[IMAGE_IN] listen transition must be supervised")
-    require(ids["image_in"] not in y_main, "[IMAGE_IN] must not appear as an output target")
-    require(ids["text_out"] in y_main, "image QA fixture must select [TEXT_OUT]")
+    require(y_main[image_idx] == ids["listen"], "[IMAGE_INPUT] must be user-context input targeting [LISTEN]")
+    require(float(ws[image_idx]) > 0.0, "[IMAGE_INPUT] listen transition must be supervised")
+    require(ids["image_in"] not in y_main, "[IMAGE_INPUT] must not appear as an output target")
+    require(ids["text_out"] in y_main, "image QA fixture must select [TEXT_OUTPUT]")
     require(ids["model_end"] in y_main, "image QA fixture must terminate with [MODEL_END]")
+
+    pixels = np.zeros((24, 24, 3), dtype=np.uint8)
+    pixels[..., 0] = 220
+    pixels[:, 10:14, 1] = 180
+    pixel_row = {"pixels": pixels, "question": "What color dominates?", "answer": "red"}
+    img_xs, img_ys, img_ws, img_meta = train.tokenize_image_recognition(pixel_row, {})
+    img_x_main = [main_token(x) for x in img_xs]
+    visual_count = sum(1 for token_id in img_x_main if train.is_image_token_id(token_id))
+    require(visual_count == train.config.image_tokens_per_sample, f"expected {train.config.image_tokens_per_sample} visual tokens, got {visual_count}")
+    require(ids["image_in"] in img_x_main, "pixel image row did not include [IMAGE_INPUT]")
+    require(ids["text_in"] in img_x_main, "pixel image row did not include [TEXT_INPUT] question prefix")
+    try:
+        train.tokenize_image_recognition(
+            {"image_text": "A red mug is on a desk.", "question": "What object is visible?", "answer": "mug"},
+            {},
+        )
+    except train.DataQualityError:
+        pass
+    else:
+        raise AssertionError("image_protocol: caption-only image row should be rejected")
     print(
         "[image][OK] "
         f"image_index={image_idx} image_weight={float(ws[image_idx])} "
-        f"text_out_targets={y_main.count(ids['text_out'])} meta={meta}"
+        f"text_out_targets={y_main.count(ids['text_out'])} "
+        f"visual_tokens={visual_count} meta={meta} pixel_meta={img_meta}"
     )
     return True
 
@@ -564,7 +585,7 @@ def audit_local_mix_tokenization(args: argparse.Namespace, strict: bool) -> bool
                 if role == "user":
                     user_prompts[normalize_text(content)] += 1
                 if role in {"assistant", "model", "gpt"}:
-                    forbidden = [marker for marker in ("[AUDIO_IN]", "[AUDIO_OUT]", "[AUDIO_END]", "[IMAGE_IN]") if marker in content]
+                    forbidden = [marker for marker in ("[AUDIO_INPUT]", "[AUDIO_OUTPUT]", "[IMAGE_INPUT]") if marker in content]
                     if forbidden:
                         warning = f"{path}: assistant text contains raw modality marker(s) {forbidden} in row id={row.get('id')}"
                         print(f"[local-tokenize][WARN] {warning}")
@@ -587,10 +608,10 @@ def audit_local_mix_tokenization(args: argparse.Namespace, strict: bool) -> bool
                 for message in messages
                 if isinstance(message, dict) and str(message.get("role") or "") == "user"
             )
-            if "[IMAGE_IN]" in user_blob or mode == "image_recognition":
+            if "[IMAGE_INPUT]" in user_blob or mode == "image_recognition":
                 x_main = [main_token(x) for x in xs]
                 if ids.get("image_in", -1) not in x_main:
-                    warning = f"{path}: row id={row.get('id')} contains [IMAGE_IN] text but no image_in token in input"
+                    warning = f"{path}: row id={row.get('id')} contains [IMAGE_INPUT] text but no image_in token in input"
                     print(f"[local-tokenize][WARN] {warning}")
                     warnings.append(warning)
         top_repeat = user_prompts.most_common(1)
@@ -627,7 +648,7 @@ def audit_generated_sample(path: Path, strict: bool) -> bool:
             continue
         _, rhs = line.split("->", 1)
         token = rhs.strip()
-        if token == "[TEXT_OUT]":
+        if token == "[TEXT_OUTPUT]":
             saw_text_out = True
             continue
         if not saw_text_out:
@@ -643,11 +664,11 @@ def audit_generated_sample(path: Path, strict: bool) -> bool:
     compact_prefix = normalize_text(prefix.replace(" ", ""))
     warnings: list[str] = []
     if not saw_text_out:
-        warnings.append("generated sample never selected [TEXT_OUT]")
+        warnings.append("generated sample never selected [TEXT_OUTPUT]")
     if not saw_model_end:
         warnings.append("generated sample did not terminate with [MODEL_END]")
-    if content_tokens and not compact_prefix.startswith("yes"):
-        warnings.append(f"generated sample starts with {prefix!r}, expected one-word answer 'yes'")
+    if content_tokens and not compact_prefix.startswith("lima"):
+        warnings.append(f"generated sample starts with {prefix!r}, expected one-word answer 'Lima'")
     if len(content_tokens) > 3:
         warnings.append(f"generated sample emitted {len(content_tokens)} content tokens, expected one word")
     joined = "".join(content_tokens).lower()
@@ -675,7 +696,6 @@ def audit_run_config(path: Path, strict: bool) -> bool:
         "stateful_validation": data.get("stateful_validation"),
         "train_unroll_len": data.get("train_unroll_len"),
         "validation_batches": data.get("validation_batches"),
-        "validation_control_batches": data.get("validation_control_batches"),
         "audio_backend": data.get("audio_backend"),
         "audio_sample_rate": data.get("audio_sample_rate"),
         "audio_codebooks": data.get("audio_codebooks"),
@@ -686,8 +706,6 @@ def audit_run_config(path: Path, strict: bool) -> bool:
     }
     print(f"[config] path={path} {interesting}")
     warnings: list[str] = []
-    if data.get("validation_control_batches", 0) == 0:
-        warnings.append("run used validation_control_batches=0")
     if data.get("train_unroll_len", 0) < 64:
         warnings.append(f"run used short train_unroll_len={data.get('train_unroll_len')}")
     if data.get("stateful_train") is not True or data.get("stateful_validation") is not True:
