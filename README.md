@@ -17,22 +17,22 @@
 
 Propagator is a JAX-based streaming language and speech model architecture using a persistent, fixed-size matrix for memory. Transformer models store a growing history of keys and values in a KV cache. Propagator compresses this data into a static recurrent matrix state during each forward pass. This gives inference a constant-size memory state per layer instead of a token-length KV cache, at the cost of lossy compression.
 
-The current experimental run is a multimodal duplex model trained on text dialogue, instruction data, ASR rows, TTS rows, audio reconstruction, and hybrid speech-dialogue supervision. It uses a byte-level BPE tokenizer with protocol tokens, EnCodec audio tokens, stateful chunk sampling, and weighted losses for content, control, modality, and audio-codebook targets.
+The current experimental run is a multimodal duplex model trained on text dialogue, instruction data, image recognition, ASR rows, TTS rows, audio reconstruction, and mixed speech-dialogue supervision. It uses a byte-level BPE tokenizer with protocol tokens, Mimi audio tokens, image patch tokens, stateful chunk sampling, and weighted losses for content, control, modality, and audio-codebook targets.
 
 ## Current Snapshot
 
-The latest audited checkpoint published in this README is step 145,000 for the current multimodal run.
+The active 1B run was restarted from scratch after the size correction. The plots and tables below are from the previous 586M archive at step 1,020,000, so keep them separate from the new 1B checkpoint line.
 
 | Item | Value |
 | :--- | :--- |
-| Parameters | 586.5M |
+| Parameters | 1,003,631,024 |
 | Layers | 24 matrix-memory blocks |
-| Hidden size | 1536 |
-| Memory per layer | 384 keys x 768 values |
-| Training unroll | 32 stream steps |
-| Effective batch | 64, sharded across 4 JAX devices |
+| Hidden size | 1920 |
+| Memory per layer | 416 keys x 832 values |
+| Training unroll | 64 stream steps |
+| Effective batch | 16, sharded across 8 JAX devices |
 | Tokenizer | 16k byte-level BPE plus protocol/audio tokens |
-| Audited v2 audio codec | EnCodec, 24 kHz, 8 codebooks x 1024 codes at 75 Hz |
+| Audio codec | Mimi, 24 kHz, 8 codebooks x 2048 codes at 12.5 Hz |
 | Precision | bfloat16 training |
 | Optimizer | AdamW, peak LR 1e-4, 5k warmup, 0.01 weight decay in the corrective training script |
 
@@ -40,9 +40,9 @@ The run is still a research prototype. Turn-taking and output-mode control are a
 
 ## Training Data
 
-The current run trains from a source-aware multimodal mixture defined in `data/propagator_dataset_mix.json`. The mix combines public text, instruction, dialogue, ASR, TTS, paired speech-dialogue, and a small local identity set for model-name consistency without letting identity rows dominate the sampler.
+The current run trains from a source-aware multimodal mixture defined in `data/mixes/propagator_dataset_mix.json`. Local JSONL datasets live under `data/datasets/`; sampling plans and weights live under `data/mixes/`. The mix combines public text, instruction, dialogue, ASR, TTS, paired speech-dialogue, and a small local identity set for model-name consistency without letting identity rows dominate the sampler.
 
-The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current training mix contains `977,638,592` packed training tokens; audio rows also carry parallel EnCodec codebook lanes internally, so this is the sequence-token count used for training.
+The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current training mix contains `977,638,592` packed training tokens; audio rows also carry parallel Mimi codebook lanes internally, so this is the sequence-token count used for training.
 
 | Source | Description | Type | Weight | Tokens |
 | :--- | :--- | :--- | ---: | ---: |
@@ -57,7 +57,7 @@ The weights below are sampling weights used by the training pipeline, not exact 
 | [`distil-whisper/librispeech_asr`](https://huggingface.co/datasets/distil-whisper/librispeech_asr) | LibriSpeech-derived speech | ASR / TTS | 0.06 | `10,938,176` |
 | [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | Encyclopedic text | Text pretraining | 0.05 | `99,042,112` |
 | [`google/fleurs`](https://huggingface.co/datasets/google/fleurs) (`en_us`) | Multispeaker English speech | ASR / TTS | 0.04 | `916,064` |
-| [`data/propagator_identity.jsonl`](data/propagator_identity.jsonl) | Propagator identity examples | Text dialogue | 0.04 | `947,200` |
+| [`data/datasets/propagator_identity.jsonl`](data/datasets/propagator_identity.jsonl) | Propagator identity examples | Text dialogue | 0.04 | `947,200` |
 | [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | Instruction-response examples | Instruction tuning | 0.03 | `2,915,040` |
 | [`PolyAI/minds14`](https://huggingface.co/datasets/PolyAI/minds14) (`en-US`) | Short intent utterances | ASR | 0.02 | `166,784` |
 
@@ -66,10 +66,10 @@ The weights below are sampling weights used by the training pipeline, not exact 
 | Task | Input stream | Target stream | Purpose |
 | :--- | :--- | :--- | :--- |
 | Text->Text | User text or plain text | Assistant text or continuation | Dialogue, instruction following, and language modeling |
-| Audio->Text | EnCodec user audio tokens | Transcript text | ASR-style speech understanding |
-| Text->Audio | Text prompt | EnCodec assistant audio tokens | TTS-style acoustic generation |
-| Audio->Audio | EnCodec user audio tokens | EnCodec output audio tokens | Speech reconstruction and continuation |
-| Audio->Hybrid | EnCodec user audio tokens | Text followed by audio tokens | Full duplex-style speech dialogue response |
+| Audio->Text | Mimi user audio tokens | Transcript text | ASR-style speech understanding |
+| Text->Audio | Text prompt | Mimi assistant audio tokens | TTS-style acoustic generation |
+| Audio->Audio | Mimi user audio tokens | Mimi output audio tokens | Speech reconstruction and continuation |
+| Audio->Hybrid | Mimi user audio tokens | Text followed by audio tokens | Full duplex-style speech dialogue response |
 
 Validation uses each source's validation split when one is available. For sources that only expose a training split, rows are deterministically partitioned by index so that `idx % 10 == 0` is held out for validation.
 
@@ -216,14 +216,14 @@ The architecture handles incoming user speech while managing the response state 
 | [MODEL] | Model start | Switches to response mode for retrieval |
 | [USER_INTERRUPT] | Interruption | Handles user speech during model response |
 | [MODEL_END] | Model finished | Signals the end of the response |
-| [TEXT_IN] | Text input segment | Marks text supplied by the user |
-| [AUDIO_IN] | Audio input segment | Marks codec-token audio supplied by the user |
-| [TEXT_OUT] | Text output mode | Declares that the model response is text |
-| [AUDIO_OUT] | Audio output mode | Declares that the model response is audio codec tokens |
-| [AUDIO_END] | Audio output end | Terminates an audio segment |
-| [HYBRID_OUT] | Hybrid output mode | Declares a response containing text and audio |
+| [TEXT_INPUT] | Text input segment | Marks text supplied by the user |
+| [AUDIO_INPUT] | Audio input segment | Marks codec-token audio supplied by the user |
+| [IMAGE_INPUT] | Image input segment | Marks visual tokens supplied by the user |
+| [TEXT_OUTPUT] | Text output segment | Declares that the next response segment is text |
+| [AUDIO_OUTPUT] | Audio output segment | Declares that the next response segment is audio codec tokens |
+| [IMAGE_OUTPUT] | Image output segment | Reserved for generated visual-token segments |
 
-The multimodal training protocol covers Text->Text, Audio->Text, Text->Audio, Audio->Audio, and Audio->Hybrid supervision. Hybrid rows use [HYBRID_OUT] followed by text content and an [AUDIO_OUT] audio segment.
+The multimodal training protocol covers Text->Text, Audio->Text, Image->Text, Text->Audio, Audio->Audio, and sequential mixed-output supervision. Mixed-output rows are represented as ordered output segments, for example `[TEXT_OUTPUT]` followed by text content and then `[AUDIO_OUTPUT]` followed by audio codec frames. There is no separate hybrid token; output composition is expressed by segment order.
 
 ### Sequence Diagram
 
@@ -270,20 +270,25 @@ The reported CE is a weighted multimodal objective, not a plain text perplexity.
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Latest completed eval at step 145,000:
+Previous 586M-run eval retained for comparison, completed at step 1,020,000:
 
 | Metric | Value |
 | :--- | ---: |
-| Train weighted CE | 3.45 |
-| Validation weighted CE | 3.83 |
-| Best validation weighted CE so far | 3.83 at step 145,000 |
-| Decision accuracy | 90.11% |
-| Listen accuracy | 90.27% |
-| User-end accuracy | 78.24% |
-| Model-end accuracy | 71.97% |
-| Text token accuracy | 34.48% |
-| Audio token accuracy | 37.45% |
-| Audio codebook exact accuracy | 0.04% |
+| Train weighted CE | 2.64 |
+| Validation weighted CE | 2.27 |
+| Validation composite score | 0.679 |
+| Decision accuracy | 96.52% |
+| Listen accuracy | 96.46% |
+| User-end accuracy | 97.51% |
+| Model-end accuracy | 73.08% |
+| Text token accuracy | 71.27% |
+| Audio token accuracy | 48.31% |
+| Audio codebook exact accuracy | 0.78% |
+| Audio auxiliary token accuracy | 12.46% |
+| ASR task accuracy | 74.51% |
+| Duplex task accuracy | 51.01% |
+| Image task accuracy | 67.73% |
+| Image task CE | 0.272 |
 
 ### Protocol and Modality
 
@@ -303,64 +308,39 @@ Latest completed eval at step 145,000:
 | :---: | :---: |
 | ![Duplex Task Accuracy](assets/val_duplex_task_acc.png) | ![Audio Codebook Accuracy](assets/val_audio_codebook_acc.png) |
 
+| Composite Score | Image Task Accuracy |
+| :---: | :---: |
+| ![Composite Score](assets/val_composite_score.png) | ![Image Task Accuracy](assets/val_image_task_acc.png) |
+
+The image metric is teacher-forced token accuracy, not exact-match generation. In the step 1,020,000 probes, `red_mug` produced `parasail` and `blue_car` produced `yellow`.
+
 ## Output Examples
 
-These examples are from the step 145,000 runtime loop. They show protocol control behavior rather than finished assistant quality.
+These examples are from the previous 586M run's step 1,020,000 runtime loop. Protocol control is better than the earlier checkpoints, while open-ended output is still rough.
 
-### Identity Prompt
+| Probe | Input | Model output |
+| :--- | :--- | :--- |
+| Identity | `What` + `is your name?` | `I'm Propagator.` |
+| Format following | `Answer with one word:` + `is water wet?` | `No.` |
+| Turn boundary | user speech followed by `[USER_END]` | switches to `[MODEL]` then `[TEXT_OUTPUT]` |
+| Interruption-like input | user continues speaking without `[USER_END]` | response stream is not started |
 
-```text
-## user stream
-[SESSION] -> [LISTEN]
-[USER] -> [LISTEN]
-"What" -> [LISTEN]
-"is your name?" -> [USER_END]
+| Image probe | Input | Generated answer |
+| :--- | :--- | :--- |
+| `red_mug` | `A red mug is on a desk.` + `What object is visible?` | `parasail` |
+| `blue_car` | `A blue car is parked on the street.` + `What color is the car?` | `yellow` |
 
-## model stream
-[USER_END] -> [MODEL]
-[MODEL] -> [TEXT_OUT]
-[TEXT_OUT] -> P
-P -> rop
-rop -> ag
-ag -> ator
-ator -> .
-. -> [MODEL_END]
-```
-
-### Silence / Turn Boundary
-
-```text
-## user stream
-[SESSION] -> [LISTEN]
-[USER] -> [LISTEN]
-"I am going to pause" -> [LISTEN]
-"[SILENCE]" -> [USER_END]
-
-## model stream
-[USER_END] -> [MODEL]
-[MODEL] -> [TEXT_OUT]
-```
-
-### Interruption-Like Input
-
-```text
-## user stream
-[SESSION] -> [LISTEN]
-[USER] -> [LISTEN]
-"Actually wait" -> [LISTEN]
-"stop" -> [LISTEN]
-"new question" -> [LISTEN]
-
-## model stream
-not started because runtime policy did not receive [USER_END].
-```
+| Audio prompt | Rendered sample | Notes |
+| :--- | :---: | :--- |
+| `Say this aloud: the code word is amber.` | <audio controls src="assets/audio_generation_00.wav"></audio><br/>[WAV](assets/audio_generation_00.wav) | 2.00s, 24 kHz |
+| `Read this number sequence aloud: two, seven, four.` | <audio controls src="assets/audio_generation_01.wav"></audio><br/>[WAV](assets/audio_generation_01.wav) | 1.36s, 24 kHz |
 
 ### Interpretation
 
 - Session management: `[SESSION]` initializes the memory matrix for each interaction.
 - Listening: the model targets `[LISTEN]` during user input to update the matrix without output.
 - Turn-taking: `[USER_END]` triggers the switch from writing/listening to response mode.
-- Response mode: `[MODEL]` is followed by `[TEXT_OUT]`, `[AUDIO_OUT]`, or `[HYBRID_OUT]`.
+- Response mode: `[MODEL]` is followed by an ordered output segment such as `[TEXT_OUTPUT]`, `[AUDIO_OUTPUT]`, or `[IMAGE_OUTPUT]`. Multi-output responses concatenate these segment markers in generation order.
 - Current limitation: control tokens are learning faster than high-quality long-form generation.
 
 ## Setup and Execution
@@ -374,6 +354,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install --upgrade "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
+
+For TPU runs, transparent hugepages must be enabled before importing JAX/libtpu:
+
+```bash
+sudo sh -c 'echo always > /sys/kernel/mm/transparent_hugepage/enabled'
+```
+
+`scripts/train.sh` performs this check automatically and exits if it cannot enable the setting.
 
 ### Background Training
 ```bash
@@ -398,29 +386,38 @@ The checked-in script configures the active multimodal run:
 
 | Setting | Default |
 | :--- | :--- |
-| Model | 24 layers, hidden 1536, memory 384 x 768 |
+| Model | 24 layers, hidden 1920, memory 416 x 832, 1,003,631,024 parameters |
 | Recurrent memory upgrades | 4 grouped associative key lanes, RoPE-style stream-position key rotation, SwiGLU MLP; optional MoE experts |
-| Batch | auto-batched, max 16 examples per device |
+| Batch | 2 examples per device, global batch 16 across 8 JAX devices |
+| Epochs | 1 full pass over the uncapped tokenized training set |
 | Precision | bfloat16 |
 | Optimizer | AdamW with grad clipping |
-| Training cap | No max-step cap is set by default; training duration is controlled by epochs, checkpoint cadence, validation, and operator stop/resume policy |
+| Output root | `outputs/propagator-multimodal_1b`; `_1b` is a parameter-size family suffix, not a version tag. The launch script refuses smaller presets in this root. |
+| Training cap | Full uncapped tokenization/training on each training partition by default: max train/val chunks, max steps, data packs, audio duration limits, early stopping, tokenizer row limits, and per-dataset `max_chunks`/`max_shards`/`debug_max_rows` are disabled and fail fast if enabled |
+| Validation holdout | Same-split sources keep a deterministic 9:1 train/validation partition with `SAME_SPLIT_VALIDATION_STRIDE=10`; the 90% training partition is trained uncapped |
 | Tokenizer | 16k byte-level BPE by default; SL2610 preset trains/uses a 32k target when `TOKENIZER_VOCAB_SIZE` is not overridden |
 | Audio | Mimi, 24 kHz, 8 synchronized codebooks x 2048 codes at 12.5 Hz |
-| Eval cadence | every 5,000 steps |
-| Checkpoint cadence | every 10,000 steps |
-| GCS cadence | every 10,000 steps when `GCS_BACKUP_DIR` is set |
+| Eval cadence | every 20,000 steps |
+| Checkpoint cadence | every 50,000 steps |
+| GCS cadence | every 50,000 steps when `GCS_BACKUP_DIR` is set |
 
-Most settings can be overridden through environment variables before launching:
+Most settings can be overridden through environment variables before launching. Use small dimensions only for smoke tests or explicitly named compact runs:
 
 ```bash
 HIDDEN_SIZE=768 NUM_LAYERS=12 BATCH_SIZE=16 bash scripts/train.sh --foreground
 ```
 
+Use `OUTPUT_ROOT=...` when launching if a run intentionally targets a different parameter-size family; keep the suffix descriptive, for example `_1b`, rather than using version labels.
+
+For the active 1B-family teacher run, keep `MODEL_PRESET=full`; the launch script refuses compact presets such as `sl2610` when the output root contains `_1b`.
+
+Use the 1B run as the teacher line first. Once its validation and probe outputs are steadier, distill into the SL2610-style student from teacher traces, modality choices, and final answers instead of trying to make the compact run carry the research result too early.
+
 ### Post-Training / SL2610 2GB Preset
 
-The repository includes a README-aligned English-only post-training set at `data/propagator_posttrain_10k.jsonl` and a mix file at `data/propagator_posttrain_mix.json`. The rows focus on Propagator identity, recurrent matrix memory behavior, turn-taking, recall, edge serving, quantization, and the architecture changes above.
+The repository includes a cleaned README-aligned English-only post-training set at `data/datasets/propagator_posttrain_cleaned.jsonl` and a mix file at `data/mixes/propagator_posttrain_mix.json`. The rows focus on Propagator identity, recurrent matrix memory behavior, turn-taking, recall, edge serving, quantization, and the architecture changes above.
 
-Run a compact architecture intended for 4-bit edge serving experiments:
+Run a compact architecture intended for 4-bit edge serving experiments, not for the 1B teacher run:
 
 ```bash
 POST_TRAIN=1 MODEL_PRESET=sl2610 bash scripts/train.sh
@@ -432,7 +429,7 @@ Run the same preset in the foreground:
 POST_TRAIN=1 MODEL_PRESET=sl2610 bash scripts/train.sh --foreground
 ```
 
-The SL2610 preset sets hidden size 768, 16 layers, 192 x 384 memory, grouped associative memory, SwiGLU, two MoE experts with top-1 routing, a 32k tokenizer target, and 4-bit edge reporting. The training hardware and serving target are intentionally separate: training can run on TPU/GPU infrastructure, while the architecture and edge report budget for batch-1 SL2610 2GB VRAM serving.
+The SL2610 preset sets hidden size 768, 16 layers, 192 x 384 memory, grouped associative memory, SwiGLU, one MoE expert with top-1 routing, a 32k tokenizer target, and 4-bit edge reporting. The training hardware and serving target are intentionally separate: training can run on TPU/GPU infrastructure, while the architecture and edge report budget for batch-1 SL2610 2GB VRAM serving.
 
 ## Research Application
 
