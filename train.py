@@ -4,6 +4,7 @@
 import argparse
 import atexit
 import functools
+import gc
 import hashlib
 import io
 import json
@@ -84,6 +85,7 @@ if hasattr(hf_datasets, "disable_progress_bars"):
     hf_datasets.disable_progress_bars()
 
 LOGGER = logging.getLogger("propagator")
+logging.getLogger("huggingface_hub.repocard").setLevel(logging.ERROR)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -267,7 +269,9 @@ def log_info(*args: Any, **kwargs: Any) -> None:
 configure_logging()
 
 TRAINING_RUN_NAME = "propagator-duplex"
-DEFAULT_OUTPUT_ROOT = str(Path("outputs") / "propagator-multimodal")
+DEFAULT_OUTPUT_ROOT = str(Path("outputs") / "propagator-multimodal_1b")
+MIXED_CACHE_PROTOCOL = "multimodal_user_interrupt_stateful_directional_segments"
+SOURCE_CACHE_PROTOCOL = "source_cache_staged_row_pack_directional_segments"
 
 # Global configuration and state
 config: Any = None
@@ -278,6 +282,9 @@ _RUN_LOCK_FD: int | None = None
 _RUN_LOCK_PATH: Path | None = None
 _RUN_LOCK_OWNER_PID: int | None = None
 _ACTIVE_POOLS: list[Any] = []
+_SHUTDOWN_REQUESTED = False
+_SHUTDOWN_SIGNAL: int | None = None
+_SHUTDOWN_SIGNAL_COUNT = 0
 train_control_input_tokens: np.ndarray | None = None
 train_control_target_tokens: np.ndarray | None = None
 train_control_loss_weights: np.ndarray | None = None
@@ -304,6 +311,16 @@ SPECIAL_TOKENS = [
     "[MODEL_END]",
     "[SESSION_END]",
     "[USER_INTERRUPT]",
+    "[TEXT_INPUT]",
+    "[TEXT_OUTPUT]",
+    "[AUDIO_INPUT]",
+    "[AUDIO_OUTPUT]",
+    "[IMAGE_INPUT]",
+    "[IMAGE_OUTPUT]",
+    "[SILENCE]",
+]
+
+DEPRECATED_SPECIAL_TOKENS = [
     "[TEXT]",
     "[TEXT_IN]",
     "[TEXT_OUT]",
@@ -315,25 +332,26 @@ SPECIAL_TOKENS = [
     "[IMAGE_IN]",
     "[HYBRID]",
     "[HYBRID_OUT]",
-    "[SILENCE]",
 ]
 
 
 def _tokenize_modal_input_prefix(token: str) -> list[int]:
     """Return standardized modal prefix tokens for user-side inputs."""
+    if token == "text":
+        return [token_ids["text_in"]]
     if token == "audio":
-        return [token_ids["audio"], token_ids["audio_in"]]
+        return [token_ids["audio_in"]]
     if token == "image":
-        return [token_ids["image"], token_ids["image_in"]]
+        return [token_ids["image_in"]]
     if token == "hybrid":
-        return [token_ids["hybrid"], token_ids["audio"], token_ids["audio_in"]]
+        return [token_ids["audio_in"]]
     return []
 
 DEFAULT_DATASET_MIX = json.dumps(
     [
         {
             "name": "json",
-            "data_files": "data/propagator_identity.jsonl",
+            "data_files": "data/datasets/propagator_identity.jsonl",
             "split": "train",
             "validation_split": "train",
             "mode": "duplex_chat",
@@ -427,7 +445,7 @@ DEFAULT_DATASET_MIX = json.dumps(
     ],
     separators=(",", ":"),
 )
-DEFAULT_DATASET_MIX_PATH = Path(__file__).resolve().parent / "data" / "propagator_dataset_mix.json"
+DEFAULT_DATASET_MIX_PATH = Path(__file__).resolve().parent / "data" / "mixes" / "propagator_dataset_mix.json"
 if DEFAULT_DATASET_MIX_PATH.exists():
     DEFAULT_DATASET_MIX = json.dumps(
         json.loads(DEFAULT_DATASET_MIX_PATH.read_text(encoding="utf-8")),
@@ -436,15 +454,15 @@ if DEFAULT_DATASET_MIX_PATH.exists():
 
 
 class PropagatorConfig(BaseSettings):
-    hidden_size: int = 1536
+    hidden_size: int = 1920
     num_layers: int = 24
-    memory_key_size: int = 384
-    memory_value_size: int = 768
+    memory_key_size: int = 416
+    memory_value_size: int = 832
     associative_groups: int = 4
-    mlp_multiplier: int = 4
+    mlp_multiplier: int = 3
     use_swiglu: bool = True
     moe_num_experts: int = 1
-    moe_top_k: int = 2
+    moe_top_k: int = 1
     rope_base: float = 10_000.0
     rope_position_scale: float = 16.0
     rope_max_position: int = 1_048_576
@@ -455,40 +473,40 @@ class PropagatorConfig(BaseSettings):
 
     learning_rate: float = 3e-4
     warmup_steps: int = 5000
-    epochs: int = 3
+    epochs: int = 1
     max_steps: int = 0
     seed: int = 42
 
-    eval_every: int = 5000
-    checkpoint_every: int = 10_000
+    eval_every: int = 20_000
+    checkpoint_every: int = 50_000
     train_log_every: int = 2000
-    early_stopping_patience: int = 12
+    early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.01
+    eval_validation_samples: int = 8
     sample_gen_len: int = 256
-    sample_chunks: str = '["Answer with exactly one lowercase word:", "is water wet?"]'
+    sample_chunks: str = '["Reply with only the second city in this list:", "Seoul, Lima, Oslo."]'
     eval_text_cases: str = json.dumps(
         [
             {"name": "identity_name", "chunks": ["What", "is your name?"]},
-            {"name": "instruction_summary", "chunks": ["Give me", "a three-item checklist for preparing a guest room."]},
+            {
+                "name": "instruction_summary",
+                "chunks": [
+                    "Summarize in one sentence:",
+                    "The museum changed its weekend hours, added a family tour, and moved ticket pickup to the west entrance.",
+                ],
+            },
             {"name": "factual_qa", "chunks": ["What is the capital", "of France?"]},
             {"name": "reasoning", "chunks": ["A box has three red balls and two blue balls.", "How many balls are there?"]},
             {"name": "context_recall", "chunks": ["The code word is amber.", "Repeat only the code word."]},
-            {"name": "format_following", "chunks": ["Answer with one word:", "is water wet?"]},
-            {"name": "json_action", "chunks": ["Return JSON only with keys status and action.", "The pump is hot and vibrating."]},
+            {"name": "command_following", "chunks": ["Reply with only the second city in this list:", "Seoul, Lima, Oslo."]},
             {"name": "extraction", "chunks": ["Extract device and location:", "Sensor A12 reports 71 C in bay 4."]},
-            {"name": "image_recognition", "chunks": ["A red mug is on a desk in the image.", "What object is visible?"]},
+            {"name": "classification", "chunks": ["Classify the message as praise, complaint, or question:", "The delivery arrived late and the box was open."]},
             {"name": "architecture", "chunks": ["In one sentence,", "how does Propagator store context?"]},
             {"name": "turn_policy_silence", "chunks": ["I am still speaking", "[SILENCE]", "[SILENCE]"]},
         ],
         separators=(",", ":"),
     )
-    eval_image_cases: str = json.dumps(
-        [
-            {"name": "red_mug", "image_text": "A red mug is on a desk.", "question": "What object is visible?"},
-            {"name": "blue_car", "image_text": "A blue car is parked on the street.", "question": "What color is the car?"},
-        ],
-        separators=(",", ":"),
-    )
+    eval_image_cases: str = json.dumps([], separators=(",", ":"))
     temperature: float = 0.7
     top_k: int = 50
 
@@ -526,6 +544,9 @@ class PropagatorConfig(BaseSettings):
     cache_storage: str = "auto"
     cache_read_mode: str = "auto"
     cache_read_memory_fraction: float = 0.50
+    dataset_streaming_retries: int = 10
+    dataset_streaming_retry_initial_delay: float = 5.0
+    dataset_streaming_retry_max_delay: float = 60.0
     echox_cache_raw_shards: bool = False
     echox_raw_cache_dir: str | None = None
     echox_raw_cache_min_free_gb: float = 96.0
@@ -581,7 +602,7 @@ class PropagatorConfig(BaseSettings):
         separators=(",", ":"),
     )
     eval_audio_samples: int = 2
-    eval_audio_every: int = 5_000
+    eval_audio_every: int = 20_000
     audio_frames_per_second: float = 12.5
     eval_audio_seconds: float = 5.0
     eval_audio_tokens: int = 3000
@@ -596,7 +617,6 @@ class PropagatorConfig(BaseSettings):
     audio_token_loss_weight: float = 1.0
     audio_codebook_loss_weight: float = 1.0
     audio_out_loss_weight: float = 2.0
-    audio_end_loss_weight: float = 2.0
     output_modality_loss_weight: float = 2.0
     audio_min_generation_seconds: float = 1.0
     audio_min_generation_tokens: int = 256
@@ -686,12 +706,11 @@ token_ids_session_end: int
 token_ids_user_interrupt: int
 token_ids_audio_in: int
 token_ids_audio_out: int
-token_ids_audio_end: int
 token_ids_silence: int
 token_ids_text_in: int
 token_ids_text_out: int
-token_ids_hybrid_out: int
 token_ids_image_in: int
+token_ids_image_out: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -726,6 +745,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-log-every", type=int)
     parser.add_argument("--early-stopping-patience", type=int)
     parser.add_argument("--early-stopping-min-delta", type=float)
+    parser.add_argument("--eval-validation-samples", type=int)
     parser.add_argument("--sample-gen-len", type=int)
     parser.add_argument("--sample-chunks", type=str)
     parser.add_argument("--eval-text-cases", type=str)
@@ -785,6 +805,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-storage", type=str, choices=["auto", "disk", "memory"])
     parser.add_argument("--cache-read-mode", type=str, choices=["auto", "mmap", "memory"])
     parser.add_argument("--cache-read-memory-fraction", type=float)
+    parser.add_argument("--dataset-streaming-retries", type=int)
+    parser.add_argument("--dataset-streaming-retry-initial-delay", type=float)
+    parser.add_argument("--dataset-streaming-retry-max-delay", type=float)
     parser.add_argument("--echox-cache-raw-shards", action="store_true")
     parser.add_argument("--no-echox-cache-raw-shards", action="store_true")
     parser.add_argument("--echox-raw-cache-dir", type=str)
@@ -854,7 +877,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-token-loss-weight", type=float)
     parser.add_argument("--audio-codebook-loss-weight", type=float)
     parser.add_argument("--audio-out-loss-weight", type=float)
-    parser.add_argument("--audio-end-loss-weight", type=float)
     parser.add_argument("--output-modality-loss-weight", type=float)
     parser.add_argument("--audio-min-generation-seconds", type=float)
     parser.add_argument("--audio-min-generation-tokens", type=int)
@@ -1040,6 +1062,12 @@ def build_config() -> PropagatorConfig:
         cfg = cfg.model_copy(update={"data_pack_count": 0, "data_pack_index": 0})
     elif int(cfg.data_pack_count) > 1:
         cfg = cfg.model_copy(update={"data_pack_index": int(cfg.data_pack_index) % int(cfg.data_pack_count)})
+    if int(cfg.dataset_streaming_retries) < 1:
+        raise ValueError("--dataset-streaming-retries must be >= 1")
+    if float(cfg.dataset_streaming_retry_initial_delay) < 0:
+        raise ValueError("--dataset-streaming-retry-initial-delay must be >= 0")
+    if float(cfg.dataset_streaming_retry_max_delay) < 0:
+        raise ValueError("--dataset-streaming-retry-max-delay must be >= 0")
 
     seconds_updates: dict[str, int] = {}
     if raw_updates.get("eval_audio_tokens") is None:
@@ -1057,6 +1085,7 @@ def build_config() -> PropagatorConfig:
     if seconds_updates:
         cfg = cfg.model_copy(update=seconds_updates)
 
+    enforce_uncapped_training_config(cfg)
     return cfg
 
 
@@ -1121,26 +1150,74 @@ def parse_json_object(raw: str, fallback: dict[str, float]) -> dict[str, float]:
     return out or fallback
 
 
-def parse_dataset_mix() -> list[dict[str, Any]]:
-    raw = (config.dataset_mix or "").strip()
+def raw_dataset_specs_for_config(cfg: PropagatorConfig) -> list[dict[str, Any]]:
+    raw = (cfg.dataset_mix or "").strip()
     if raw:
         try:
             parsed = json.loads(raw)
-            if not isinstance(parsed, list):
-                raise ValueError("dataset_mix must be a JSON list")
-            specs = [dict(item) for item in parsed if isinstance(item, dict)]
-        except Exception as exc:
+        except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid --dataset-mix JSON: {exc}") from exc
-    else:
-        specs = [
-            {
-                "name": config.dataset_name,
-                "split": config.dataset_split,
-                "validation_split": config.validation_split,
-                "mode": config.dataset_mode,
-                "weight": 1.0,
-            }
-        ]
+        if not isinstance(parsed, list):
+            raise ValueError("dataset_mix must be a JSON list")
+        return [dict(item) for item in parsed if isinstance(item, dict)]
+    return [
+        {
+            "name": cfg.dataset_name,
+            "split": cfg.dataset_split,
+            "validation_split": cfg.validation_split,
+            "mode": cfg.dataset_mode,
+            "weight": 1.0,
+        }
+    ]
+
+
+def enforce_uncapped_training_config(cfg: PropagatorConfig) -> None:
+    cap_errors: list[str] = []
+    if int(cfg.max_train_chunks) > 0:
+        cap_errors.append(f"--max-train-chunks={cfg.max_train_chunks}")
+    if int(cfg.max_val_chunks) > 0:
+        cap_errors.append(f"--max-val-chunks={cfg.max_val_chunks}")
+    if cfg.max_train_rows is not None and int(cfg.max_train_rows) > 0:
+        cap_errors.append(f"--max-train-rows={cfg.max_train_rows}")
+    if cfg.max_val_rows is not None and int(cfg.max_val_rows) > 0:
+        cap_errors.append(f"--max-val-rows={cfg.max_val_rows}")
+    if int(cfg.max_steps) > 0:
+        cap_errors.append(f"--max-steps={cfg.max_steps}")
+    if int(cfg.early_stopping_patience) > 0:
+        cap_errors.append(f"--early-stopping-patience={cfg.early_stopping_patience}")
+    if int(cfg.data_pack_count) > 1:
+        cap_errors.append(f"--data-pack-count={cfg.data_pack_count}")
+    if cfg.validation_skip_rows is not None and int(cfg.validation_skip_rows) > 0:
+        cap_errors.append(f"--validation-skip-rows={cfg.validation_skip_rows}")
+    if float(cfg.max_audio_seconds) > 0.0:
+        cap_errors.append(f"--max-audio-seconds={cfg.max_audio_seconds}")
+    if int(cfg.max_audio_tokens_per_row) > 0:
+        cap_errors.append(f"--max-audio-tokens-per-row={cfg.max_audio_tokens_per_row}")
+    if int(cfg.tokenizer_train_rows) > 0:
+        cap_errors.append(f"--tokenizer-train-rows={cfg.tokenizer_train_rows}")
+    for idx, spec in enumerate(raw_dataset_specs_for_config(cfg)):
+        label = f"dataset_mix[{idx}] {spec.get('name', '<unnamed>')}"
+        for key in ("max_chunks", "max_shards", "debug_max_rows"):
+            if spec.get(key) is not None:
+                cap_errors.append(f"{label} {key}={spec[key]}")
+    same_split_specs = [
+        spec.get("name", "<unnamed>")
+        for spec in raw_dataset_specs_for_config(cfg)
+        if str(spec.get("split", cfg.dataset_split)) == str(spec.get("validation_split", cfg.validation_split))
+    ]
+    if cfg.validation_skip_rows is None and same_split_specs and int(cfg.same_split_validation_stride) <= 1:
+        cap_errors.append(
+            "--same-split-validation-stride must be >1 when train and validation use the same source split; "
+            f"same_split_sources={same_split_specs[:8]}"
+        )
+
+    if cap_errors:
+        formatted = ", ".join(cap_errors)
+        raise ValueError(f"Full uncapped training requires valid split/cap settings: {formatted}")
+
+
+def parse_dataset_mix() -> list[dict[str, Any]]:
+    specs = raw_dataset_specs_for_config(config)
 
     normalized = []
     for spec in specs:
@@ -1336,10 +1413,10 @@ def source_dataset_fingerprint(spec: dict[str, Any], split_name: str) -> str:
 
 
 def source_cache_prefix(spec: dict[str, Any], split_name: str, source_idx: int) -> Path:
-    preprocessing_protocol = "source_cache_staged_row_pack"
     sig_str = "|".join(
         [
-            preprocessing_protocol,
+            SOURCE_CACHE_PROTOCOL,
+            f"source_idx={int(source_idx)}",
             ",".join(SPECIAL_TOKENS),
             source_dataset_fingerprint(spec, split_name),
             split_name,
@@ -1371,7 +1448,6 @@ def source_cache_prefix(spec: dict[str, Any], split_name: str, source_idx: int) 
             str(config.audio_token_loss_weight),
             str(config.audio_codebook_loss_weight),
             str(config.audio_out_loss_weight),
-            str(config.audio_end_loss_weight),
             str(config.output_modality_loss_weight),
             str(config.synthesize_turn_silence),
             str(config.silence_end_tokens),
@@ -1768,10 +1844,9 @@ def iter_tokenizer_training_texts():
 
     if produced == 0:
         fallback_files = [
-            Path("data/propagator_instruction_balanced_seed.jsonl"),
-            Path("data/propagator_image_recognition_seed.jsonl"),
-            Path("data/propagator_identity.jsonl"),
-            Path("data/propagator_posttrain_10k.jsonl"),
+            Path("data/datasets/propagator_instruction_balanced_seed.jsonl"),
+            Path("data/datasets/propagator_identity.jsonl"),
+            Path("data/datasets/propagator_posttrain_cleaned.jsonl"),
         ]
         for path in fallback_files:
             if not path.exists():
@@ -1858,7 +1933,30 @@ def ensure_special_tokens(tokenizer_obj: Tokenizer) -> dict[str, int]:
         if idx is None:
             raise ValueError(f"Failed to add special token to tokenizer: {tok}")
         ids[tok.strip("[]").lower()] = int(idx)
+    aliases = {
+        "text_in": "text_input",
+        "text_out": "text_output",
+        "audio_in": "audio_input",
+        "audio_out": "audio_output",
+        "image_in": "image_input",
+        "image_out": "image_output",
+    }
+    for alias, canonical in aliases.items():
+        if canonical in ids:
+            ids[alias] = ids[canonical]
     return ids
+
+
+def deprecated_special_token_ids() -> set[int]:
+    if tokenizer is None:
+        return set()
+    ids: set[int] = set()
+    for tok in DEPRECATED_SPECIAL_TOKENS:
+        idx = tokenizer.token_to_id(tok)
+        if idx is not None:
+            ids.add(int(idx))
+    return ids
+
 
 def save_tokenizer_snapshot() -> None:
     if not config.save_augmented_tokenizer:
@@ -2115,7 +2213,7 @@ def decode_audio_token_ids_to_waveform(token_ids_: list[int]) -> tuple[np.ndarra
     for token_id in token_ids_:
         parsed = audio_code_from_token_id(int(token_id))
         if parsed is None:
-            if int(token_id) == token_ids_audio_end and seen:
+            if int(token_id) in audio_segment_stop_token_ids() and seen:
                 frames.append(current.copy())
             continue
         codebook_idx, code = parsed
@@ -2181,7 +2279,7 @@ def normalize_audio_for_eval(audio: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def control_token_ids() -> set[int]:
-    return {
+    ids = {
         token_ids["session"],
         token_ids["user"],
         token_ids["model"],
@@ -2190,21 +2288,18 @@ def control_token_ids() -> set[int]:
         token_ids["model_end"],
         token_ids["session_end"],
         token_ids["user_interrupt"],
-        token_ids.get("text", -1),
         token_ids["audio_in"],
-        token_ids.get("audio", -1),
         token_ids.get("image_in", -1),
-        token_ids.get("image", -1),
+        token_ids.get("image_out", -1),
         token_ids["audio_out"],
-        token_ids["audio_end"],
         token_ids["silence"],
         token_ids["text_in"],
         token_ids["text_out"],
-        token_ids.get("hybrid", -1),
-        token_ids.get("hybrid_out", -1),
         token_ids["pad"],
         token_ids["unk"],
     }
+    ids.update(deprecated_special_token_ids())
+    return {token_id for token_id in ids if token_id >= 0}
 
 
 def decision_token_ids() -> set[int]:
@@ -2222,10 +2317,9 @@ def new_target_stats() -> dict[str, int]:
         "audio_in": 0,
         "audio": 0,
         "audio_out": 0,
-        "audio_end": 0,
         "image_in": 0,
+        "image_out": 0,
         "image": 0,
-        "hybrid_out": 0,
         "listen": 0,
         "user_end": 0,
         "model_end": 0,
@@ -2252,9 +2346,7 @@ def default_loss_weight_for_target(target_id: int) -> float:
         return float(config.listen_loss_weight)
     if target_id == token_ids["audio_out"]:
         return float(config.audio_out_loss_weight)
-    if target_id == token_ids["audio_end"]:
-        return float(config.audio_end_loss_weight)
-    if target_id in {token_ids["text_out"], token_ids.get("hybrid_out", -1)}:
+    if target_id in {token_ids["text_out"], token_ids.get("image_out", -1)}:
         return float(config.output_modality_loss_weight)
     if is_audio_token_id(target_id):
         return float(config.audio_token_loss_weight)
@@ -2332,14 +2424,11 @@ def add_target_stats(stats: dict[str, int], target_id: int, weight: float) -> No
     elif target_id == token_ids["audio_out"]:
         stats["audio_out"] += 1
         stats["control"] += 1
-    elif target_id == token_ids["audio_end"]:
-        stats["audio_end"] += 1
-        stats["control"] += 1
     elif target_id == token_ids["text_out"]:
         stats["text_out"] += 1
         stats["control"] += 1
-    elif target_id == token_ids.get("hybrid_out", -1):
-        stats["hybrid_out"] += 1
+    elif target_id == token_ids.get("image_out", -1):
+        stats["image_out"] += 1
         stats["control"] += 1
     elif is_audio_token_id(target_id):
         stats["audio"] += 1
@@ -2380,14 +2469,11 @@ def remove_target_stats(stats: dict[str, int], target_id: int, weight: float) ->
     elif target_id == token_ids["audio_out"]:
         stats["audio_out"] -= 1
         stats["control"] -= 1
-    elif target_id == token_ids["audio_end"]:
-        stats["audio_end"] -= 1
-        stats["control"] -= 1
     elif target_id == token_ids["text_out"]:
         stats["text_out"] -= 1
         stats["control"] -= 1
-    elif target_id == token_ids.get("hybrid_out", -1):
-        stats["hybrid_out"] -= 1
+    elif target_id == token_ids.get("image_out", -1):
+        stats["image_out"] -= 1
         stats["control"] -= 1
     elif is_audio_token_id(target_id):
         stats["audio"] -= 1
@@ -2458,6 +2544,10 @@ def tokenize_duplex(
             else:
                 add(token_id, token_ids["listen"], config.user_inner_loss_weight)
 
+    def add_user_text_segment(tokens: list[int]) -> None:
+        start_user_if_needed()
+        add_user_chunk([token_ids["text_in"], *tokens])
+
     def close_user_to_model() -> None:
         nonlocal user_open, last_user_token_index
         if user_open and last_user_token_index is not None:
@@ -2478,7 +2568,7 @@ def tokenize_duplex(
 
     def start_model_with_token(first_token: int) -> None:
         nonlocal model_open, pending_model_token_index
-        add(token_ids["model"], first_token, config.content_loss_weight)
+        add(token_ids["model"], first_token)
         pending_model_token_index = add(first_token, token_ids["pad"], 0.0)
         model_open = True
 
@@ -2487,7 +2577,7 @@ def tokenize_duplex(
         if pending_model_token_index is None:
             pending_model_token_index = add(token_id, token_ids["pad"], 0.0)
             return
-        set_target(pending_model_token_index, token_id, config.content_loss_weight)
+        set_target(pending_model_token_index, token_id)
         pending_model_token_index = add(token_id, token_ids["pad"], 0.0)
 
     def close_model_normally(next_target_after_model_end: int) -> None:
@@ -2529,8 +2619,7 @@ def tokenize_duplex(
         if role == "user":
             if model_open:
                 inject_user_interrupt()
-            start_user_if_needed()
-            add_user_chunk(tokens)
+            add_user_text_segment(tokens)
             if next_role == "assistant":
                 close_user_to_model()
 
@@ -2652,13 +2741,13 @@ def text_output_ids(text_ids: list[int]) -> list[int]:
 def audio_output_ids(audio_ids: list[list[int]]) -> list[list[int] | int]:
     if not audio_ids:
         raise ValueError("Audio output requires non-empty audio ids")
-    return [token_ids["audio_out"], *audio_ids, token_ids["audio_end"]]
+    return [token_ids["audio_out"], *audio_ids]
 
 
 def hybrid_output_ids(text_ids: list[int], audio_ids: list[list[int]]) -> list[list[int] | int]:
     if not text_ids or not audio_ids:
         raise ValueError("Hybrid output requires non-empty text and audio ids")
-    return [token_ids["hybrid_out"], *text_ids, token_ids["audio_out"], *audio_ids, token_ids["audio_end"]]
+    return [token_ids["text_out"], *text_ids, token_ids["audio_out"], *audio_ids]
 
 
 def tokenize_modal_exchange(
@@ -2747,7 +2836,7 @@ def tokenize_audio_asr(row: dict, spec: dict[str, Any] | None = None) -> tuple[l
     task = choose_audio_task(row, transcript, spec)
     if task == "tts":
         prompt = format_tts_prompt(transcript)
-        user_ids = [*_tokenize_modal_input_prefix("audio"), *encode_text(prompt)]
+        user_ids = [*_tokenize_modal_input_prefix("text"), *encode_text(prompt)]
         model_ids = audio_output_ids(audio_ids)
         return tokenize_modal_exchange(user_ids, model_ids)
 
@@ -2818,7 +2907,7 @@ def tokenize_mimi_codes_speech_text(row: dict, spec: dict[str, Any] | None = Non
 
     if task == "tts":
         prompt = format_tts_prompt(transcript)
-        return tokenize_modal_exchange(_tokenize_modal_input_prefix("audio") + encode_text(prompt), audio_output_ids(audio_ids))
+        return tokenize_modal_exchange(_tokenize_modal_input_prefix("text") + encode_text(prompt), audio_output_ids(audio_ids))
 
     if task in {"audio", "audio_audio", "speech"}:
         user_ids = [*_tokenize_modal_input_prefix("audio"), *audio_ids]
@@ -2846,23 +2935,54 @@ def first_nonempty_string(row: dict, keys: list[str]) -> str:
     return ""
 
 
-def image_text_to_patch_token_ids(text: str) -> list[int]:
-    normalized = " ".join(str(text).lower().split())
-    words = re.findall(r"[\w']+", normalized) or ["image"]
-    tokens: list[int] = []
-    for idx in range(int(config.image_tokens_per_sample)):
-        word = words[idx % len(words)]
-        digest = hashlib.blake2b(f"{idx}:{word}:{normalized}".encode("utf-8"), digest_size=8).digest()
-        code = int.from_bytes(digest, "little") % int(config.image_patch_vocab_size)
-        tokens.append(image_token_id(code))
+def normalize_image_token_count(tokens: list[int]) -> list[int]:
+    target = int(config.image_tokens_per_sample)
+    if not tokens:
+        raise DataQualityError("Image row produced no visual tokens")
+    tokens = tokens[:target]
+    while len(tokens) < target:
+        tokens.append(image_token_id(0))
     return tokens
+
+
+def precomputed_image_token_ids(row: dict, spec: dict[str, Any] | None = None) -> list[int] | None:
+    keys = []
+    if spec and spec.get("image_tokens_key"):
+        keys.append(str(spec["image_tokens_key"]))
+    keys.extend(["image_tokens", "visual_tokens", "vision_tokens", "image_codes", "visual_codes"])
+    raw = None
+    for key in keys:
+        if key in row and row[key] is not None:
+            raw = row[key]
+            break
+    if raw is None:
+        return None
+    try:
+        values = np.asarray(raw, dtype=np.int64).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise DataQualityError("Precomputed image token field must contain integer token codes") from exc
+    if values.size == 0:
+        raise DataQualityError("Precomputed image token field is empty")
+    tokens: list[int] = []
+    for value in values:
+        code = int(value)
+        if image_token_start <= code < image_token_end:
+            tokens.append(code)
+        elif 0 <= code < int(config.image_patch_vocab_size):
+            tokens.append(image_token_id(code))
+        else:
+            raise DataQualityError(
+                f"Precomputed image token {code} outside valid code range [0, {int(config.image_patch_vocab_size)}) "
+                f"or token range [{image_token_start}, {image_token_end})"
+            )
+    return normalize_image_token_count(tokens)
 
 
 def _extract_image_value(row: dict, spec: dict[str, Any] | None = None) -> Any | None:
     keys = []
     if spec and spec.get("image_key"):
         keys.append(str(spec["image_key"]))
-    keys.extend(["image", "images", "frame", "camera_image", "camera_frame", "pixels"])
+    keys.extend(["image", "images", "frame", "camera_image", "camera_frame", "pixels", "image_path", "path", "file"])
     for key in keys:
         if key in row and row[key] is not None:
             return row[key]
@@ -2915,6 +3035,45 @@ def _image_value_to_array(value: Any) -> np.ndarray | None:
     return array
 
 
+def image_feature_code(block: np.ndarray, row_idx: int, col_idx: int, grid_h: int, grid_w: int) -> int:
+    block_f = np.asarray(block, dtype=np.float32) / 255.0
+    if block_f.size == 0:
+        return 0
+    rgb_mean = np.clip(block_f.reshape(-1, 3).mean(axis=0), 0.0, 1.0)
+    rgb_std = np.clip(block_f.reshape(-1, 3).std(axis=0), 0.0, 1.0)
+    luma = 0.299 * block_f[..., 0] + 0.587 * block_f[..., 1] + 0.114 * block_f[..., 2]
+    contrast = float(np.std(luma))
+    if luma.shape[0] > 1 and luma.shape[1] > 1:
+        gy, gx = np.gradient(luma)
+        edge_mag = float(np.sqrt(gx * gx + gy * gy).mean())
+        edge_x = float(gx.mean())
+        edge_y = float(gy.mean())
+    else:
+        edge_mag = 0.0
+        edge_x = 0.0
+        edge_y = 0.0
+    hue = int(np.argmax(rgb_mean))
+    saturation = float(np.max(rgb_mean) - np.min(rgb_mean))
+    features = [
+        row_idx,
+        col_idx,
+        max(1, grid_h),
+        max(1, grid_w),
+        int(np.clip(rgb_mean[0] * 15.0, 0, 15)),
+        int(np.clip(rgb_mean[1] * 15.0, 0, 15)),
+        int(np.clip(rgb_mean[2] * 15.0, 0, 15)),
+        int(np.clip(rgb_std.mean() * 15.0, 0, 15)),
+        int(np.clip(float(luma.mean()) * 15.0, 0, 15)),
+        int(np.clip(contrast * 31.0, 0, 15)),
+        int(np.clip(edge_mag * 63.0, 0, 15)),
+        int(np.clip((math.atan2(edge_y, edge_x) + math.pi) / (2.0 * math.pi) * 15.0, 0, 15)),
+        int(np.clip(saturation * 15.0, 0, 15)),
+        hue,
+    ]
+    digest = hashlib.blake2b(bytes(features), digest_size=4).digest()
+    return int.from_bytes(digest, "little") % int(config.image_patch_vocab_size)
+
+
 def image_array_to_patch_token_ids(array: np.ndarray) -> list[int]:
     array = np.asarray(array)
     if array.ndim == 2:
@@ -2941,32 +3100,32 @@ def image_array_to_patch_token_ids(array: np.ndarray) -> list[int]:
         x_idx = np.linspace(0, array.shape[1] - 1, resolution).astype(np.int32)
         resized = array[y_idx][:, x_idx]
 
+    target_tokens = int(config.image_tokens_per_sample)
+    grid_h = max(1, int(math.sqrt(target_tokens)))
+    grid_w = max(1, int(math.ceil(target_tokens / grid_h)))
+    y_edges = np.linspace(0, resolution, grid_h + 1).astype(np.int32)
+    x_edges = np.linspace(0, resolution, grid_w + 1).astype(np.int32)
     tokens: list[int] = []
-    for y in range(0, resolution, patch):
-        for x in range(0, resolution, patch):
-            block = resized[y : y + patch, x : x + patch]
-            if block.size == 0:
-                continue
-            mean_rgb = block.reshape(-1, 3).mean(axis=0)
-            r = int(mean_rgb[0] // 32) & 0x7
-            g = int(mean_rgb[1] // 32) & 0x7
-            b = int(mean_rgb[2] // 16) & 0xF
-            tokens.append(image_token_id((r << 7) | (g << 4) | b))
-            if len(tokens) >= int(config.image_tokens_per_sample):
-                return tokens
-
-    if not tokens:
-        raise DataQualityError("Image row produced no patch tokens")
-    while len(tokens) < int(config.image_tokens_per_sample):
-        tokens.append(tokens[len(tokens) % len(tokens)])
-    return tokens[: int(config.image_tokens_per_sample)]
+    for gy in range(grid_h):
+        for gx in range(grid_w):
+            if len(tokens) >= target_tokens:
+                break
+            y0, y1 = int(y_edges[gy]), int(y_edges[gy + 1])
+            x0, x1 = int(x_edges[gx]), int(x_edges[gx + 1])
+            block = resized[y0:max(y0 + 1, y1), x0:max(x0 + 1, x1)]
+            code = image_feature_code(block, gy, gx, grid_h, grid_w)
+            tokens.append(image_token_id(code))
+    return normalize_image_token_count(tokens)
 
 
 def image_patch_token_ids(row: dict, image_text: str, spec: dict[str, Any] | None = None) -> list[int]:
+    precomputed = precomputed_image_token_ids(row, spec)
+    if precomputed is not None:
+        return precomputed
     array = _image_value_to_array(_extract_image_value(row, spec))
     if array is not None:
         return image_array_to_patch_token_ids(array)
-    return image_text_to_patch_token_ids(image_text)
+    raise DataQualityError("Image recognition row has no pixel image or precomputed visual tokens")
 
 
 def tokenize_image_recognition(row: dict, spec: dict[str, Any] | None = None) -> tuple[list[list[int]], list[list[int]], list[float], dict[str, int]]:
@@ -2987,7 +3146,7 @@ def tokenize_image_recognition(row: dict, spec: dict[str, Any] | None = None) ->
     question = first_nonempty_string(row, question_keys) or "Describe the image."
     answer = first_nonempty_string(row, answer_keys)
     if not image_text:
-        if _extract_image_value(row, spec) is not None:
+        if precomputed_image_token_ids(row, spec) is not None or _extract_image_value(row, spec) is not None:
             image_text = "image"
     if not image_text:
         raise DataQualityError("Image recognition row has no image description or metadata text")
@@ -3281,13 +3440,28 @@ def terminate_active_pools() -> None:
 def shutdown_pool(pool: Any, *, terminate: bool, timeout: float = 10.0) -> None:
     workers = list(getattr(pool, "_pool", []) or [])
     if terminate:
+        try:
+            pool.terminate()
+        except Exception:
+            pass
+        deadline = time.time() + max(0.5, float(timeout))
+        for proc in workers:
+            try:
+                remaining = max(0.0, deadline - time.time())
+                proc.join(timeout=min(0.2, remaining))
+            except Exception:
+                pass
         for proc in workers:
             try:
                 pid = int(getattr(proc, "pid", 0) or 0)
-                if pid > 0:
+                if pid > 0 and proc.is_alive():
                     os.kill(pid, signal.SIGKILL)
             except Exception:
                 pass
+        try:
+            pool.join()
+        except Exception:
+            pass
         return
     else:
         try:
@@ -3334,17 +3508,37 @@ def shutdown_pool(pool: Any, *, terminate: bool, timeout: float = 10.0) -> None:
 
 
 def install_signal_handlers() -> None:
+    def shutdown_signal_name(signum: int) -> str:
+        try:
+            return signal.Signals(signum).name
+        except Exception:
+            return str(signum)
+
     def _handle_signal(signum, _frame) -> None:
-        log_info(f"[Signal] Received {signum}; terminating active workers before exit.", flush=True)
-        terminate_active_pools()
-        release_run_lock()
-        os._exit(128 + int(signum))
+        global _SHUTDOWN_REQUESTED, _SHUTDOWN_SIGNAL, _SHUTDOWN_SIGNAL_COUNT
+        _SHUTDOWN_REQUESTED = True
+        _SHUTDOWN_SIGNAL = int(signum)
+        _SHUTDOWN_SIGNAL_COUNT += 1
+        name = shutdown_signal_name(int(signum))
+        if _SHUTDOWN_SIGNAL_COUNT >= 2:
+            log_info(f"[Signal] Received repeated {name}; forcing exit after terminating active workers.")
+            terminate_active_pools()
+            release_run_lock()
+            os._exit(128 + int(signum))
+        if _ACTIVE_POOLS:
+            log_info(f"[Signal] Received {name}; tokenization progress flush requested after the current worker batch.")
+        else:
+            log_info(f"[Signal] Received {name}; graceful checkpoint requested at the next training step boundary.")
 
     try:
         signal.signal(signal.SIGTERM, _handle_signal)
         signal.signal(signal.SIGINT, _handle_signal)
     except Exception:
         pass
+
+
+def shutdown_requested() -> bool:
+    return bool(_SHUTDOWN_REQUESTED)
 
 
 def acquire_pid_file_lock(lock_path: Path, label: str, poll_seconds: float = 5.0, log_events: bool = True) -> int:
@@ -3737,7 +3931,7 @@ def cache_prefix(split_name: str, max_chunks: int, split_spec: str, skip_rows: i
     specs = parse_dataset_mix()
     sig_str = "|".join(
         [
-            "multimodal_user_interrupt_stateful_current",
+            MIXED_CACHE_PROTOCOL,
             ",".join(SPECIAL_TOKENS),
             dataset_fingerprint(specs, split_name),
             split_name,
@@ -3772,7 +3966,6 @@ def cache_prefix(split_name: str, max_chunks: int, split_spec: str, skip_rows: i
             str(config.audio_token_loss_weight),
             str(config.audio_codebook_loss_weight),
             str(config.audio_out_loss_weight),
-            str(config.audio_end_loss_weight),
             str(config.output_modality_loss_weight),
             str(config.synthesize_turn_silence),
             str(config.silence_end_tokens),
@@ -3972,8 +4165,9 @@ def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0, skip_l
     import time
     for _ in range(repeat_count):
         consumed_rows = max(0, int(skip_rows))
-        max_retries = 10
-        retry_delay = 5.0
+        max_retries = max(1, int(getattr(config, "dataset_streaming_retries", 10)))
+        retry_delay = max(0.0, float(getattr(config, "dataset_streaming_retry_initial_delay", 5.0)))
+        max_retry_delay = max(0.0, float(getattr(config, "dataset_streaming_retry_max_delay", 60.0)))
 
         attempt = 0
         while attempt < max_retries:
@@ -3981,7 +4175,9 @@ def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0, skip_l
                 active_ds = dataset
                 skip_target = int(consumed_rows)
                 manual_skip = skip_target > 0
-                if skip_target > 0 and hasattr(active_ds, "skip"):
+                if skip_target > 0 and bool(getattr(config, "streaming", False)):
+                    manual_skip = True
+                elif skip_target > 0 and hasattr(active_ds, "skip"):
                     active_ds = active_ds.skip(skip_target)
                     manual_skip = False
                 elif skip_target > 0 and not config.streaming and hasattr(active_ds, "select"):
@@ -4023,7 +4219,7 @@ def safe_dataset_iter(dataset, repeat_count: int = 1, skip_rows: int = 0, skip_l
                     raise
                 log_info(f"[Dataset] Network error during streaming (attempt {attempt}/{max_retries}): {e}. Retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60.0)
+                retry_delay = min(max(retry_delay * 2, retry_delay), max_retry_delay)
 
         # Reset skip_rows for the next repeat cycle
         skip_rows = 0
@@ -4209,11 +4405,39 @@ def initial_uncapped_chunk_capacity(spec: dict[str, Any] | None, dataset: Any | 
     return 65_536
 
 
+def known_dataset_total_rows(dataset: Any | None, repeat_count: int) -> int:
+    if dataset is None:
+        return 0
+    try:
+        row_count = int(len(dataset))
+    except Exception:
+        return 0
+    if row_count <= 0:
+        return 0
+    return row_count * max(1, int(repeat_count))
+
+
 def flush_token_cache_arrays(*arrays: np.ndarray) -> None:
     for array in arrays:
         flush = getattr(array, "flush", None)
         if flush is not None:
             flush()
+
+
+def release_token_cache_arrays(*arrays: np.ndarray, flush: bool = True) -> None:
+    """Flush and close memmap-backed arrays so old source caches do not stay resident."""
+    for array in arrays:
+        if flush:
+            flush_array = getattr(array, "flush", None)
+            if flush_array is not None:
+                flush_array()
+        mmap_obj = getattr(array, "_mmap", None)
+        if mmap_obj is not None:
+            try:
+                mmap_obj.close()
+            except Exception:
+                pass
+    gc.collect()
 
 
 def tokenize_echox_dataset_sharded(
@@ -4480,6 +4704,7 @@ def tokenize_echox_dataset_sharded(
             maxtasksperchild=max(0, int(config.tokenize_maxtasks_per_child or 0)) or None,
         )
         _ACTIVE_POOLS.append(pool)
+        shutdown_during_tokenization = False
         try:
             for task in tasks:
                 task_with_queue = (*task, progress_queue)
@@ -4488,6 +4713,10 @@ def tokenize_echox_dataset_sharded(
             pending = list(async_results)
             last_periodic_log = time.time()
             while pending:
+                if shutdown_requested():
+                    shutdown_during_tokenization = True
+                    log_info(f"[EchoX:{split_name}] Shutdown requested; preserving completed shard progress for resume.")
+                    break
                 drain_progress_queue()
                 next_pending = []
                 for result in pending:
@@ -4514,8 +4743,10 @@ def tokenize_echox_dataset_sharded(
                     last_periodic_log = now
                 if pending:
                     time.sleep(1.0)
+            if shutdown_requested():
+                shutdown_during_tokenization = True
             drain_progress_queue()
-            shutdown_pool(pool, terminate=False)
+            shutdown_pool(pool, terminate=shutdown_during_tokenization)
         except BaseException:
             shutdown_pool(pool, terminate=True)
             raise
@@ -4523,6 +4754,9 @@ def tokenize_echox_dataset_sharded(
             if pool in _ACTIVE_POOLS:
                 _ACTIVE_POOLS.remove(pool)
             manager.shutdown()
+
+        if shutdown_during_tokenization:
+            raise SystemExit(128 + int(_SHUTDOWN_SIGNAL or signal.SIGTERM))
 
     manifests.sort(key=lambda item: int(item.get("shard_index", 0)))
     actual_count = 0
@@ -4585,7 +4819,7 @@ def tokenize_echox_dataset_sharded(
         "dataset_config": spec.get("config"),
         "dataset_mode": spec.get("mode"),
         "repeat": 1,
-        "protocol": "multimodal_user_interrupt_stateful_echox_sharded",
+        "protocol": f"{SOURCE_CACHE_PROTOCOL}_echox_sharded",
         "special_tokens": SPECIAL_TOKENS,
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
@@ -4593,6 +4827,7 @@ def tokenize_echox_dataset_sharded(
         "image_token_start": image_token_start,
         "image_token_end": image_token_end,
         "shards": len(manifests),
+        **source_meta_fields(spec, split_name, None, stream_offset),
     }
     if cache_storage == "disk":
         del input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
@@ -4642,6 +4877,7 @@ def tokenize_dataset_rows(
     if estimated_chunks > 0 and pack is not None:
         pack_count, _ = pack
         estimated_chunks = max(1, math.ceil(estimated_chunks / max(1, pack_count)))
+    source_total_rows = known_dataset_total_rows(dataset, repeat_count)
 
     actual_count = 0
     source_rows = 0
@@ -4691,13 +4927,14 @@ def tokenize_dataset_rows(
             "dataset_config": spec.get("config") if spec else None,
             "dataset_mode": row_mode,
             "repeat": repeat_count,
-            "protocol": "multimodal_user_interrupt_stateful",
+            "protocol": SOURCE_CACHE_PROTOCOL if int(stream_offset) >= 1_000_000_000 else MIXED_CACHE_PROTOCOL,
             "special_tokens": SPECIAL_TOKENS,
             "text_vocab_size": text_vocab_size,
             "audio_token_start": audio_token_start,
             "audio_token_end": audio_token_end,
             "image_token_start": image_token_start,
             "image_token_end": image_token_end,
+            **source_meta_fields(spec, split_name, None, stream_offset),
         }
         with open(str(cache_path) + ".meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -4715,6 +4952,18 @@ def tokenize_dataset_rows(
         cache_storage,
         mmap_mode,
     )
+    if resume and actual_count > 0:
+        try:
+            observed_stream_max = int(np.max(stream_ids[:actual_count]))
+            observed_source_rows = observed_stream_max - int(stream_offset) + 1
+            if observed_source_rows > source_rows:
+                log_info(
+                    f"[Tokenize:{split_name}] Resume progress source_rows={source_rows} lags "
+                    f"cached stream high-water={observed_source_rows}; using high-water for resume."
+                )
+                source_rows = observed_source_rows
+        except Exception as exc:
+            log_info(f"[Tokenize:{split_name}] Could not inspect resume stream high-water: {exc}")
 
     pad_id = token_ids["pad"]
 
@@ -4780,30 +5029,20 @@ def tokenize_dataset_rows(
     is_audio = "audio" in row_mode or row_mode in {"audio_asr", "mimi_codes_asr", "mimi_codes_tts", "mimi_codes_speech_text", "echox_s2s_dialogue", "speech_dialogue"}
     if is_audio:
         num_workers = config.audio_preprocessing_workers or min(cpu_count, 32)
+        num_workers = max(1, min(int(num_workers), cpu_count))
         row_batch_size = max(1, int(config.audio_preprocessing_batch_rows)) if int(config.audio_preprocessing_batch_rows) > 0 else max(
             1,
             int(config.audio_preprocessing_chunk_size),
         )
         chunk_size = max(1, int(config.audio_preprocessing_chunk_size))
-        if row_mode == "echox_s2s_dialogue" and num_workers > 64:
-            log_info(
-                f"[Tokenize:{split_name}] Limiting EchoX audio workers from {num_workers} to 64; "
-                "higher values were slower and unstable due to audio IPC pressure."
-            )
-            num_workers = 64
     else:
         num_workers = config.text_preprocessing_workers or min(cpu_count, 48)
+        num_workers = max(1, min(int(num_workers), cpu_count))
         row_batch_size = max(1, int(config.text_preprocessing_batch_rows)) if int(config.text_preprocessing_batch_rows) > 0 else max(
             1,
             int(config.text_preprocessing_chunk_size),
         )
         chunk_size = max(1, min(128, int(config.text_preprocessing_chunk_size)))
-        if num_workers > 64:
-            log_info(
-                f"[Tokenize:{split_name}] Limiting text workers from {num_workers} to 64; "
-                "excessive workers often lead to deadlocks and high IPC overhead."
-            )
-            num_workers = 64
 
     log_info(
         f"Starting parallel tokenization for {split_name} with {num_workers} workers "
@@ -4836,6 +5075,7 @@ def tokenize_dataset_rows(
     stop_early = False
     pool_completed = False
     display_progress_total = int(estimated_chunks) if int(estimated_chunks) > 0 else max(1, int(effective_max_chunks))
+    shutdown_during_tokenization = False
     try:
         # Prepare an iterator for the pool
         base_source_rows = source_rows
@@ -4851,6 +5091,8 @@ def tokenize_dataset_rows(
                 skip_rows=base_source_rows,
                 skip_log_label=split_name,
             ):
+                if shutdown_requested():
+                    break
                 if not batch:
                     batch_stream_id = next_stream_id
                 batch.append(row)
@@ -4875,6 +5117,11 @@ def tokenize_dataset_rows(
         last_log_rows = source_rows
         last_log_chunks = actual_count
         for result in pool.imap_unordered(_worker_tokenize_row_batch, row_gen, chunksize=imap_chunk_size):
+            if shutdown_requested():
+                shutdown_during_tokenization = True
+                stop_early = True
+                log_info(f"[Tokenize:{split_name}] Shutdown requested; flushing tokenization progress for resume.")
+                break
             if not uncapped and actual_count >= effective_max_chunks:
                 # We need to signal the pool to stop if possible, but imap is lazy
                 break
@@ -4882,7 +5129,14 @@ def tokenize_dataset_rows(
             if not isinstance(result, tuple) or len(result) != 2:
                 continue
             batch_rows, row_results = result
-            source_rows += int(batch_rows)
+            if row_results:
+                try:
+                    result_source_rows = max(int(stream_id) - int(stream_offset) + 1 for stream_id, _ in row_results)
+                    source_rows = max(source_rows, result_source_rows)
+                except Exception:
+                    source_rows += int(batch_rows)
+            else:
+                source_rows += int(batch_rows)
 
             # Periodic print for log visibility without exploding long-running logs.
             now = time.time()
@@ -4891,40 +5145,55 @@ def tokenize_dataset_rows(
                 elapsed = max(1e-6, now - last_log_time)
                 rows_per_sec = (source_rows - last_log_rows) / elapsed
                 chunks_per_sec = (actual_count - last_log_chunks) / elapsed
-                if uncapped and estimated_chunks <= 0:
-                    progress_total = max(1, int(effective_max_chunks))
-                    progress_total_kind = "capacity"
-                elif uncapped:
-                    progress_total = max(int(estimated_chunks), int(actual_count))
-                    progress_total_kind = "estimated"
-                elif estimated_chunks > 0:
-                    progress_total = min(int(estimated_chunks), int(effective_max_chunks))
-                    progress_total_kind = "target"
-                else:
-                    progress_total = max(1, int(effective_max_chunks))
-                    progress_total_kind = "target"
-                if progress_total > 0:
-                    progress_pct = 100.0 * actual_count / max(1, int(progress_total))
-                    remaining_chunks = max(0, int(progress_total) - int(actual_count))
-                    eta = remaining_chunks / max(1e-6, chunks_per_sec)
+                if source_total_rows > 0:
+                    row_pct = 100.0 * source_rows / max(1, int(source_total_rows))
+                    remaining_rows = max(0, int(source_total_rows) - int(source_rows))
+                    eta = remaining_rows / max(1e-6, rows_per_sec)
+                    row_text = f"rows={source_rows}/{int(source_total_rows)} ({row_pct:.1f}% rows)"
+                    eta_text = format_duration(eta) if rows_per_sec > 0 else "unknown"
                     if uncapped:
-                        progress_text = (
-                            f"chunks={actual_count}/{int(progress_total)} "
-                            f"({progress_pct:.1f}% {progress_total_kind})"
+                        progress_text = f"chunks={actual_count}, capacity={int(effective_max_chunks)}"
+                    else:
+                        progress_text = f"chunks={actual_count}/{int(effective_max_chunks)}, target_chunks={effective_max_chunks}"
+                else:
+                    row_text = f"rows={source_rows}"
+                    if uncapped and estimated_chunks <= 0:
+                        progress_total = 0
+                        progress_total_kind = "unbounded"
+                    elif uncapped:
+                        progress_total = int(estimated_chunks)
+                        progress_total_kind = "estimated_chunks"
+                    elif estimated_chunks > 0:
+                        progress_total = min(int(estimated_chunks), int(effective_max_chunks))
+                        progress_total_kind = "target"
+                    else:
+                        progress_total = max(1, int(effective_max_chunks))
+                        progress_total_kind = "target"
+                    if progress_total > 0:
+                        progress_pct = 100.0 * actual_count / max(1, int(progress_total))
+                        remaining_chunks = max(0, int(progress_total) - int(actual_count))
+                        eta = remaining_chunks / max(1e-6, chunks_per_sec)
+                        if uncapped:
+                            progress_text = (
+                                f"chunks={actual_count}/{int(progress_total)} "
+                                f"({progress_pct:.1f}% {progress_total_kind}), "
+                                f"capacity={int(effective_max_chunks)}"
+                            )
+                        else:
+                            progress_text = (
+                                f"chunks={actual_count}/{int(progress_total)} ({progress_pct:.1f}%), "
+                                f"target_chunks={effective_max_chunks}"
+                            )
+                        eta_text = (
+                            format_duration(eta)
+                            if chunks_per_sec > 0 and actual_count <= int(progress_total)
+                            else "unknown"
                         )
                     else:
-                        progress_text = (
-                            f"chunks={actual_count}/{int(progress_total)} ({progress_pct:.1f}%), "
-                            f"target_chunks={effective_max_chunks}"
-                        )
-                else:
-                    eta = 0.0
-                    progress_text = f"chunks={actual_count} capacity={int(effective_max_chunks)}"
-                eta_text = (
-                    format_duration(eta) if progress_total > 0 and chunks_per_sec > 0 else "running"
-                )
+                        progress_text = f"chunks={actual_count}, capacity={int(effective_max_chunks)}"
+                        eta_text = "unknown" if progress_total_kind == "unbounded" else "running"
                 log_info(
-                    f"[Tokenize:{split_name}] rows={source_rows}, {progress_text}, "
+                    f"[Tokenize:{split_name}] {row_text}, {progress_text}, "
                     f"rows_per_sec={rows_per_sec:.2f}, chunks_per_sec={chunks_per_sec:.2f}, "
                     f"eta={eta_text}"
                 )
@@ -4973,12 +5242,19 @@ def tokenize_dataset_rows(
                 stop_early = True
                 break
 
+        if shutdown_requested():
+            shutdown_during_tokenization = True
+            stop_early = True
         pbar.close()
         pool_completed = True
     finally:
         if pool in _ACTIVE_POOLS:
             _ACTIVE_POOLS.remove(pool)
         shutdown_pool(pool, terminate=not (pool_completed and not stop_early))
+
+    if shutdown_during_tokenization:
+        flush_progress()
+        raise SystemExit(128 + int(_SHUTDOWN_SIGNAL or signal.SIGTERM))
 
     flush_token_cache_arrays(input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions)
 
@@ -4994,13 +5270,14 @@ def tokenize_dataset_rows(
         "dataset_config": spec.get("config") if spec else None,
         "dataset_mode": row_mode,
         "repeat": repeat_count,
-        "protocol": "multimodal_user_interrupt_stateful",
+        "protocol": SOURCE_CACHE_PROTOCOL if int(stream_offset) >= 1_000_000_000 else MIXED_CACHE_PROTOCOL,
         "special_tokens": SPECIAL_TOKENS,
         "text_vocab_size": text_vocab_size,
         "audio_token_start": audio_token_start,
         "audio_token_end": audio_token_end,
         "image_token_start": image_token_start,
         "image_token_end": image_token_end,
+        **source_meta_fields(spec, split_name, None, stream_offset),
     }
     if cache_storage == "disk":
         del input_tokens, target_tokens, loss_weights, stream_ids, chunk_positions
@@ -5044,7 +5321,10 @@ def load_cache_or_tokenize(
         num_rows = int(meta.get("num_chunks", meta["num_rows"]))
         log_info(f"Loading cached {split_name} chunks: chunks={num_rows}, path={cp}")
 
-        return open_tokenized_cache(cp, num_rows, unroll_len)
+        cached = open_tokenized_cache(cp, num_rows, unroll_len)
+        if meta.get("components"):
+            validate_mixed_cache_components(cached[3], list(meta["components"]), parse_dataset_mix(), cp)
+        return cached
 
     specs = parse_dataset_mix()
     if len(specs) > 1 or (config.dataset_mix or "").strip():
@@ -5095,14 +5375,97 @@ def open_tokenized_cache(
 
     if should_preload:
         log_info(
-            f"[Cache] read=memory path={cache_path.name} rows={num_rows} size={format_bytes(total_bytes)} "
+            f"[Cache] read=memory path={cache_path.name} chunks={num_rows} size={format_bytes(total_bytes)} "
             f"mem_available={format_bytes(mem_free)}"
         )
         return tuple(np.asarray(array).copy() for array in arrays)  # type: ignore[return-value]
 
     backing = "tmpfs/RAM" if fs_type == "tmpfs" else fs_type
-    log_info(f"[Cache] read=mmap path={cache_path.name} rows={num_rows} size={format_bytes(total_bytes)} fs={backing}")
+    log_info(f"[Cache] read=mmap path={cache_path.name} chunks={num_rows} size={format_bytes(total_bytes)} fs={backing}")
     return arrays
+
+
+def source_uid(spec: dict[str, Any], split_name: str, source_idx: int) -> str:
+    payload = f"{int(source_idx)}|{source_dataset_fingerprint(spec, split_name)}"
+    return hashlib.md5(payload.encode()).hexdigest()[:12]
+
+
+def source_meta_fields(spec: dict[str, Any] | None, split_name: str, source_idx: int | None, stream_offset: int) -> dict[str, Any]:
+    if source_idx is None:
+        inferred = int(stream_offset // 1_000_000_000) - 1 if int(stream_offset) >= 1_000_000_000 else None
+    else:
+        inferred = int(source_idx)
+    fields: dict[str, Any] = {
+        "source_idx": inferred,
+        "stream_offset": int(stream_offset),
+    }
+    if spec is not None and inferred is not None:
+        fields["source_uid"] = source_uid(spec, _split_kind(split_name), inferred)
+    return fields
+
+
+def sampled_stream_source_indices(stream_ids: np.ndarray, rows: int, sample_window: int = 4096) -> list[int]:
+    rows = max(0, min(int(rows), len(stream_ids)))
+    if rows == 0:
+        return []
+    sample_window = max(1, int(sample_window))
+    ranges: list[tuple[int, int]] = [(0, min(rows, sample_window))]
+    if rows > sample_window:
+        mid = max(0, min(rows - sample_window, rows // 2))
+        ranges.append((mid, min(rows, mid + sample_window)))
+        ranges.append((max(0, rows - sample_window), rows))
+    samples = [np.asarray(stream_ids[start:end], dtype=np.int64) for start, end in ranges if end > start]
+    if not samples:
+        return []
+    merged = np.concatenate(samples) if len(samples) > 1 else samples[0]
+    return sorted(set((merged // 1_000_000_000 - 1).astype(np.int64).tolist()))
+
+
+def validate_stream_source_ids(
+    stream_ids: np.ndarray,
+    rows: int,
+    expected_source_idx: int,
+    cache_path: Path,
+    label: str,
+) -> None:
+    observed = sampled_stream_source_indices(stream_ids, rows)
+    if observed != [int(expected_source_idx)]:
+        raise RuntimeError(
+            f"Token cache source id mismatch for {label}: expected source_idx={int(expected_source_idx)}, "
+            f"observed={observed}, rows={int(rows)}, path={cache_path}. "
+            "Delete or rebuild this cache after the source-id cache protocol fix."
+        )
+
+
+def validate_mixed_cache_components(
+    stream_ids: np.ndarray,
+    components: list[dict[str, Any]],
+    specs: list[dict[str, Any]],
+    cache_path: Path,
+) -> None:
+    cursor = 0
+    for idx, component in enumerate(components):
+        rows = int(component.get("chunks", 0))
+        if rows <= 0:
+            continue
+        expected_idx = int(component.get("source_idx", idx))
+        if idx < len(specs) and component.get("name") != specs[idx].get("name"):
+            raise RuntimeError(
+                f"Mixed cache component mismatch at {idx}: meta_name={component.get('name')!r}, "
+                f"expected_name={specs[idx].get('name')!r}, path={cache_path}"
+            )
+        validate_stream_source_ids(
+            stream_ids[cursor : cursor + rows],
+            rows,
+            expected_idx,
+            cache_path,
+            f"mixed component {idx}:{component.get('name')}",
+        )
+        cursor += rows
+    if cursor != len(stream_ids):
+        raise RuntimeError(
+            f"Mixed cache component row count mismatch: components={cursor}, stream_rows={len(stream_ids)}, path={cache_path}"
+        )
 
 
 def find_legacy_mixed_source_cache(
@@ -5187,16 +5550,31 @@ def tokenize_mixed_dataset_rows(
                 f"path={source_cp.name}"
             )
         source_meta = Path(str(source_cp) + ".meta.json")
+        data: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
+        cached_chunks = 0
 
         if source_meta.exists():
             with open(source_meta, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-            num_rows = int(meta.get("num_chunks", meta["num_rows"]))
-            data = open_tokenized_cache(source_cp, num_rows, config.train_unroll_len)
-            if target_chunks > 0 and num_rows > target_chunks:
+            cached_chunks = int(meta.get("num_chunks", meta["num_rows"]))
+            source_stream_ids = np.memmap(
+                str(source_cp) + ".stream_id.bin",
+                dtype=np.int64,
+                mode="r",
+                shape=(cached_chunks,),
+            )
+            validate_stream_source_ids(
+                source_stream_ids,
+                cached_chunks,
+                source_idx,
+                source_cp,
+                f"{split_name}:{source_idx}:{spec['name']}",
+            )
+            release_token_cache_arrays(source_stream_ids, flush=False)
+            if target_chunks > 0 and cached_chunks > target_chunks:
                 log_info(
                     f"[Cache] Reusing source cache above target without truncation: source={source_idx}:{spec['name']} "
-                    f"cached_chunks={num_rows}, target_chunks={target_chunks}, path={source_cp.name}"
+                    f"cached_chunks={cached_chunks}, target_chunks={target_chunks}, path={source_cp.name}"
                 )
         else:
             try:
@@ -5226,20 +5604,53 @@ def tokenize_mixed_dataset_rows(
                 spec,
                 stream_offset=(source_idx + 1) * 1_000_000_000,
             )
+            validate_stream_source_ids(
+                data[3],
+                len(data[3]),
+                source_idx,
+                source_cp,
+                f"{split_name}:{source_idx}:{spec['name']}",
+            )
+            cached_chunks = len(data[0])
 
-        rows = len(data[0]) if target_chunks < 0 else min(len(data[0]), int(target_chunks))
+        rows = cached_chunks if target_chunks < 0 else min(cached_chunks, int(target_chunks))
         if rows == 0:
             log_info(f"Dataset source produced zero chunks: {spec['name']} mode={spec.get('mode')}")
+            if data is not None:
+                release_token_cache_arrays(*data)
             continue
-        if target_chunks > 0 and rows < len(data[0]):
+        if target_chunks > 0 and rows < cached_chunks:
             log_info(
                 f"[Cache] Truncating source to configured mix target: source={source_idx}:{spec['name']} "
-                f"cached_chunks={len(data[0])}, selected_chunks={rows}"
+                f"cached_chunks={cached_chunks}, selected_chunks={rows}"
             )
-        components.append((spec, data, rows))
-        component_meta.append({"name": spec["name"], "mode": spec.get("mode"), "chunks": rows, "target_chunks": target_chunks})
 
-    total_rows = sum(rows for _, _, rows in components)
+        can_reopen_source = Path(str(source_cp) + ".meta.json").exists()
+        components.append(
+            {
+                "spec": spec,
+                "cache_path": source_cp,
+                "rows": rows,
+                "cached_chunks": cached_chunks,
+                "data": None if can_reopen_source else data,
+            }
+        )
+        if data is not None and can_reopen_source:
+            release_token_cache_arrays(*data)
+        component_meta.append(
+            {
+                "source_idx": source_idx,
+                "source_uid": source_uid(spec, split_name, source_idx),
+                "name": spec["name"],
+                "split": split,
+                "mode": spec.get("mode"),
+                "weight": spec.get("weight"),
+                "chunks": rows,
+                "target_chunks": target_chunks,
+            }
+        )
+
+    total_rows = sum(int(component["rows"]) for component in components)
     if total_rows == 0:
         raise RuntimeError(f"No chunks were tokenized for mixed {split_name}")
 
@@ -5255,7 +5666,17 @@ def tokenize_mixed_dataset_rows(
     )
 
     cursor = 0
-    for _, data, rows in components:
+    for component in components:
+        rows = int(component["rows"])
+        data = component.get("data")
+        opened_for_copy = False
+        if data is None:
+            data = open_tokenized_cache(
+                Path(component["cache_path"]),
+                int(component["cached_chunks"]),
+                unroll_len,
+            )
+            opened_for_copy = True
         src_inputs, src_targets, src_weights, src_stream_ids, src_chunk_positions = data
         inputs[cursor : cursor + rows] = src_inputs[:rows]
         targets[cursor : cursor + rows] = src_targets[:rows]
@@ -5263,14 +5684,17 @@ def tokenize_mixed_dataset_rows(
         stream_ids[cursor : cursor + rows] = src_stream_ids[:rows]
         chunk_positions[cursor : cursor + rows] = src_chunk_positions[:rows]
         cursor += rows
+        if opened_for_copy:
+            release_token_cache_arrays(src_inputs, src_targets, src_weights, src_stream_ids, src_chunk_positions, flush=False)
 
     flush_token_cache_arrays(inputs, targets, weights, stream_ids, chunk_positions)
+    validate_mixed_cache_components(stream_ids, component_meta, specs, cache_path)
 
     meta = {
         "num_rows": total_rows,
         "num_chunks": total_rows,
         "train_unroll_len": unroll_len,
-        "protocol": "multimodal_user_interrupt_stateful",
+        "protocol": MIXED_CACHE_PROTOCOL,
         "components": component_meta,
         "special_tokens": SPECIAL_TOKENS,
         "text_vocab_size": text_vocab_size,
@@ -5282,6 +5706,7 @@ def tokenize_mixed_dataset_rows(
     if final_storage == "disk":
         with open(str(cache_path) + ".meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+        release_token_cache_arrays(inputs, targets, weights, stream_ids, chunk_positions)
     else:
         log_info(f"[Cache] RAM cache for mixed {split_name} is process-local and will not be reused after exit")
 
@@ -5341,20 +5766,28 @@ def build_candidate_token_ids(vocab_size_: int) -> np.ndarray:
 
 
 def build_audio_candidate_token_ids() -> np.ndarray:
-    ids = {token_ids["audio_end"], token_ids["model_end"], token_ids["session_end"]}
+    ids = audio_segment_stop_token_ids()
     if config.enable_audio:
         ids.update(range(audio_token_start, audio_token_end))
     return np.asarray(sorted(i for i in ids if 0 <= i < vocab_size), dtype=np.int32)
 
 
 def build_audio_codebook_candidate_token_ids(codebook_idx: int, allow_stop: bool = True) -> np.ndarray:
-    ids = {token_ids["audio_end"], token_ids["model_end"], token_ids["session_end"]} if allow_stop else set()
+    ids = audio_segment_stop_token_ids() if allow_stop else set()
     if config.enable_audio:
         idx = int(codebook_idx) % max(1, int(config.audio_codebooks))
         start = audio_token_start + idx * int(config.audio_codebook_size)
         end = min(audio_token_end, start + int(config.audio_codebook_size))
         ids.update(range(start, end))
     return np.asarray(sorted(i for i in ids if 0 <= i < vocab_size), dtype=np.int32)
+
+
+def audio_segment_stop_token_ids() -> set[int]:
+    ids = {token_ids["model_end"], token_ids["session_end"], token_ids["text_out"]}
+    image_out = token_ids.get("image_out", -1)
+    if image_out >= 0:
+        ids.add(image_out)
+    return ids
 
 
 def rms_norm(x: jax.Array) -> jax.Array:
@@ -5392,12 +5825,12 @@ def apply_grouped_rope(keys: jax.Array, positions: jax.Array, base: float, posit
 
 def compute_vocab_sizes(text_size: int) -> tuple[int, int, int, int, int]:
     audio_start = int(text_size)
-    audio_end = audio_start
+    audio_token_end_ = audio_start
     if config.enable_audio:
-        audio_end = audio_start + int(config.audio_codebooks) * int(config.audio_codebook_size)
-    image_start = audio_end
+        audio_token_end_ = audio_start + int(config.audio_codebooks) * int(config.audio_codebook_size)
+    image_start = audio_token_end_
     image_end = image_start + int(config.image_patch_vocab_size)
-    return image_end, audio_start, audio_end, image_start, image_end
+    return image_end, audio_start, audio_token_end_, image_start, image_end
 
 
 def model_dtype() -> Any:
@@ -5800,10 +6233,9 @@ class PropagatorModel(nnx.Module):
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_user_interrupt)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_model_end)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_session_end)
-                special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_end)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_text_out)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_audio_out)
-                special_mask = jnp.logical_or(special_mask, main_target == token_ids_hybrid_out)
+                special_mask = jnp.logical_or(special_mask, main_target == token_ids_image_out)
                 special_mask = jnp.logical_or(special_mask, main_target == token_ids_pad)
 
                 text_mask = jnp.logical_and(supervised, jnp.logical_not(audio_mask))
@@ -5898,7 +6330,7 @@ class PropagatorModel(nnx.Module):
         return total_loss, ce_loss
 
 
-@functools.partial(nnx.jit, donate_argnums=(2, 3, 4))
+@functools.partial(nnx.jit)
 def train_step_stateless(
     model: PropagatorModel,
     optimizer: nnx.Optimizer,
@@ -5944,9 +6376,9 @@ def _train_step_stateful_impl(
 def build_train_step_stateful() -> Any:
     if batch_sharding is None or vector_sharding is None or memory_sharding is None:
         if data_mesh is None:
-            return nnx.jit(_train_step_stateful_impl, donate_argnums=(2, 3, 4, 5, 6))
+            return nnx.jit(_train_step_stateful_impl, donate_argnums=(5,))
         with jax.sharding.set_mesh(data_mesh):
-            return nnx.jit(_train_step_stateful_impl, donate_argnums=(2, 3, 4, 5, 6))
+            return nnx.jit(_train_step_stateful_impl, donate_argnums=(5,))
     memory_shardings = tuple(memory_sharding for _ in range(config.num_layers))
     if data_mesh is None:
         return nnx.jit(
@@ -5962,7 +6394,7 @@ def build_train_step_stateful() -> Any:
                 vector_sharding,
             ),
             out_shardings=(None, memory_shardings),
-            donate_argnums=(2, 3, 4, 5, 6),
+            donate_argnums=(5,),
         )
     with jax.sharding.set_mesh(data_mesh):
         return nnx.jit(
@@ -5978,7 +6410,7 @@ def build_train_step_stateful() -> Any:
                 vector_sharding,
             ),
             out_shardings=(None, memory_shardings),
-            donate_argnums=(2, 3, 4, 5, 6),
+            donate_argnums=(5,),
         )
 
 
@@ -6111,6 +6543,115 @@ def run_validation_step_stateful(
             reset_mask,
             chunk_positions,
             task_ids,
+        )
+
+
+def _validation_prediction_step_impl(
+    model: PropagatorModel,
+    inputs: jax.Array,
+    targets: jax.Array,
+    memories: tuple[jax.Array, ...],
+    reset_mask: jax.Array,
+    chunk_positions: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, ...]]:
+    input_mask = inputs[..., 0] != token_ids_pad if inputs.ndim == 3 else inputs != token_ids_pad
+    memories = model.reset_memories(memories, reset_mask)
+    step_positions = (
+        chunk_positions.astype(jnp.int32)[:, None] * int(model.cfg.train_unroll_len)
+        + jnp.arange(inputs.shape[1], dtype=jnp.int32)[None, :]
+    )
+
+    def scan_step(carry, step_inputs):
+        step_in, step_target, step_valid, step_position = step_inputs
+        hidden, next_carry = model.step_hidden(step_in, carry, step_valid, step_position)
+        step_logits = model.project_full(hidden)
+        main_target = step_target[:, 0] if step_target.ndim == 2 else step_target
+
+        text_logits = step_logits[:, :text_vocab_size]
+        text_pred = jnp.argmax(text_logits, axis=-1).astype(jnp.int32)
+
+        q0_start = int(audio_token_start)
+        q0_end = q0_start + int(model.cfg.audio_codebook_size)
+        q0_logits = step_logits[:, q0_start:q0_end]
+        q0_pred = jnp.argmax(q0_logits, axis=-1).astype(jnp.int32) + q0_start
+        is_audio_main_target = jnp.logical_and(main_target >= q0_start, main_target < q0_end)
+        pred = jnp.where(is_audio_main_target, q0_pred, text_pred)
+        return next_carry, pred
+
+    final_memories, preds_t = jax.lax.scan(
+        scan_step,
+        memories,
+        (
+            jnp.swapaxes(inputs, 0, 1),
+            jnp.swapaxes(targets, 0, 1),
+            input_mask.T,
+            step_positions.T,
+        ),
+    )
+    return jnp.swapaxes(preds_t, 0, 1), tuple(jax.lax.stop_gradient(m) for m in final_memories)
+
+
+def build_validation_prediction_step() -> Any:
+    if batch_sharding is None or vector_sharding is None or memory_sharding is None:
+        if data_mesh is None:
+            return nnx.jit(_validation_prediction_step_impl)
+        with jax.sharding.set_mesh(data_mesh):
+            return nnx.jit(_validation_prediction_step_impl)
+    memory_shardings = tuple(memory_sharding for _ in range(config.num_layers))
+    if data_mesh is None:
+        return nnx.jit(
+            _validation_prediction_step_impl,
+            in_shardings=(
+                None,
+                batch_sharding,
+                batch_sharding,
+                memory_shardings,
+                vector_sharding,
+                vector_sharding,
+            ),
+            out_shardings=(batch_sharding, memory_shardings),
+        )
+    with jax.sharding.set_mesh(data_mesh):
+        return nnx.jit(
+            _validation_prediction_step_impl,
+            in_shardings=(
+                None,
+                batch_sharding,
+                batch_sharding,
+                memory_shardings,
+                vector_sharding,
+                vector_sharding,
+            ),
+            out_shardings=(batch_sharding, memory_shardings),
+        )
+
+
+def run_validation_prediction_step(
+    validation_prediction_step_fn: Any,
+    model: PropagatorModel,
+    batch_inputs: jax.Array,
+    batch_targets: jax.Array,
+    memories: tuple[jax.Array, ...],
+    reset_mask: jax.Array,
+    chunk_positions: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, ...]]:
+    if data_mesh is None:
+        return validation_prediction_step_fn(
+            model,
+            batch_inputs,
+            batch_targets,
+            memories,
+            reset_mask,
+            chunk_positions,
+        )
+    with jax.sharding.set_mesh(data_mesh):
+        return validation_prediction_step_fn(
+            model,
+            batch_inputs,
+            batch_targets,
+            memories,
+            reset_mask,
+            chunk_positions,
         )
 
 
@@ -6314,16 +6855,12 @@ def model_blocked_ids_for_generation() -> list[int]:
         token_ids_listen,
         token_ids_user_end,
         token_ids_user_interrupt,
-        token_ids.get("text", -1),
-        token_ids.get("audio", -1),
         token_ids_audio_in,
-        token_ids.get("image", -1),
         token_ids_image_in,
-        token_ids.get("hybrid", -1),
-        token_ids_audio_end,
         token_ids_silence,
         token_ids_text_in,
     ]
+    blocked.extend(deprecated_special_token_ids())
     blocked.extend(range(audio_token_start, audio_token_end))
     blocked.extend(range(image_token_start, image_token_end))
     return blocked
@@ -6341,18 +6878,13 @@ def token_label(token_id: int) -> str:
         token_ids_model_end: "[MODEL_END]",
         token_ids_session_end: "[SESSION_END]",
         token_ids_user_interrupt: "[USER_INTERRUPT]",
-        token_ids.get("text", -1): "[TEXT]",
-        token_ids_audio_in: "[AUDIO_IN]",
-        token_ids.get("audio", -1): "[AUDIO]",
-        token_ids_audio_out: "[AUDIO_OUT]",
-        token_ids_audio_end: "[AUDIO_END]",
+        token_ids_audio_in: "[AUDIO_INPUT]",
+        token_ids_audio_out: "[AUDIO_OUTPUT]",
         token_ids_silence: "[SILENCE]",
-        token_ids_text_in: "[TEXT_IN]",
-        token_ids_text_out: "[TEXT_OUT]",
-        token_ids.get("image", -1): "[IMAGE]",
-        token_ids.get("hybrid", -1): "[HYBRID]",
-        token_ids_hybrid_out: "[HYBRID_OUT]",
-        token_ids_image_in: "[IMAGE_IN]",
+        token_ids_text_in: "[TEXT_INPUT]",
+        token_ids_text_out: "[TEXT_OUTPUT]",
+        token_ids_image_in: "[IMAGE_INPUT]",
+        token_ids_image_out: "[IMAGE_OUTPUT]",
     }
     if token_id in names:
         return names[token_id]
@@ -6406,9 +6938,38 @@ def parse_eval_text_cases() -> list[dict[str, Any]]:
     return cases
 
 
-def parse_eval_image_cases() -> list[dict[str, str]]:
+def eval_case_has_image_payload(item: dict[str, Any]) -> bool:
+    keys = [
+        "image",
+        "images",
+        "frame",
+        "camera_image",
+        "camera_frame",
+        "pixels",
+        "image_path",
+        "path",
+        "file",
+        "image_tokens",
+        "visual_tokens",
+        "vision_tokens",
+        "image_codes",
+        "visual_codes",
+    ]
+    for key in keys:
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, tuple, dict)) and len(value) == 0:
+            continue
+        return True
+    return False
+
+
+def parse_eval_image_cases() -> list[dict[str, Any]]:
     raw = (config.eval_image_cases or "").strip()
-    cases: list[dict[str, str]] = []
+    cases: list[dict[str, Any]] = []
     if raw:
         try:
             parsed = json.loads(raw)
@@ -6416,20 +6977,18 @@ def parse_eval_image_cases() -> list[dict[str, str]]:
                 for idx, item in enumerate(parsed):
                     if not isinstance(item, dict):
                         continue
+                    if not eval_case_has_image_payload(item):
+                        continue
                     image_text = str(item.get("image_text") or item.get("caption") or item.get("description") or "").strip()
                     question = str(item.get("question") or item.get("prompt") or "Describe the image.").strip()
-                    if image_text and question:
-                        cases.append(
-                            {
-                                "name": str(item.get("name") or f"image_case_{idx:02d}"),
-                                "image_text": image_text,
-                                "question": question,
-                            }
-                        )
+                    if question:
+                        case = dict(item)
+                        case["name"] = str(item.get("name") or f"image_case_{idx:02d}")
+                        case["image_text"] = image_text or "image"
+                        case["question"] = question
+                        cases.append(case)
         except json.JSONDecodeError:
             pass
-    if not cases:
-        cases.append({"name": "red_mug", "image_text": "A red mug is on a desk.", "question": "What object is visible?"})
     return cases
 
 
@@ -6635,7 +7194,7 @@ def generate_image_eval_sample(
     model: PropagatorModel,
     seed: int,
     out_dir: Path,
-    case: dict[str, str],
+    case: dict[str, Any],
     sample_idx: int,
     use_candidate_head: bool,
 ) -> dict[str, Any]:
@@ -6646,16 +7205,17 @@ def generate_image_eval_sample(
     image_text = str(case["image_text"])
     question = str(case["question"])
     name = str(case["name"])
+    image_ids = image_patch_token_ids(case, image_text, case)
     lines = [
         "# image recognition runtime sample",
         f"case: {name}",
         f"image_text: {image_text}",
         f"question: {question}",
+        f"num_image_tokens: {len(image_ids)}",
         "",
         "## user stream",
     ]
 
-    image_ids = image_text_to_patch_token_ids(image_text)
     prefix_ids = [
         token_ids_session,
         token_ids_user,
@@ -6673,7 +7233,7 @@ def generate_image_eval_sample(
     )
     raw = argmax_token_from_logits(logits, candidate_ids_np)
     decision = user_mode_effective_decision(raw)
-    lines.append(f"[IMAGE]/[IMAGE_IN] + {len(image_ids)} image tokens + question -> {token_label(decision)}")
+    lines.append(f"[IMAGE_INPUT] + {len(image_ids)} image tokens + [TEXT_INPUT] question -> {token_label(decision)}")
 
     generated: list[int] = []
     if decision == token_ids_user_end:
@@ -6803,7 +7363,7 @@ def generate_audio_frames_after_prefix(
             jnp.asarray(config.temperature, dtype=jnp.float32),
         )
         q0_token = int(jax.device_get(q0[0]))
-        if q0_token in {token_ids_audio_end, token_ids_model_end, token_ids_session_end}:
+        if q0_token in audio_segment_stop_token_ids():
             stop_token = q0_token
             stop_reason = token_label(q0_token)
             break
@@ -6922,6 +7482,220 @@ def decode_text_token_ids_for_eval(ids: list[int]) -> str:
     return text
 
 
+TASK_ID_TO_NAME = {
+    0: "text",
+    1: "asr",
+    2: "tts",
+    3: "duplex",
+    4: "image",
+}
+
+
+def supervised_content_mask(target_main: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    target_main = np.asarray(target_main, dtype=np.int32)
+    weights = np.asarray(weights, dtype=np.float32)
+    supervised = np.logical_and(weights > 0.0, target_main != int(token_ids_pad))
+    audio_mask = np.logical_and(target_main >= int(audio_token_start), target_main < int(audio_token_end))
+    special_ids = {
+        token_ids_listen,
+        token_ids_user_end,
+        token_ids_user_interrupt,
+        token_ids_model_end,
+        token_ids_session_end,
+        token_ids_text_out,
+        token_ids_audio_out,
+        token_ids_image_out,
+        token_ids_pad,
+    }
+    special_mask = np.isin(target_main, np.asarray(list(special_ids), dtype=np.int32))
+    text_mask = np.logical_and(supervised, np.logical_not(audio_mask))
+    text_mask = np.logical_and(text_mask, np.logical_not(special_mask))
+    return np.logical_or(text_mask, np.logical_and(supervised, audio_mask))
+
+
+def collect_text_tokens_from_positions(tokens: np.ndarray, positions: np.ndarray) -> list[int]:
+    out: list[int] = []
+    flat = np.asarray(tokens, dtype=np.int32).reshape(-1)
+    for pos in np.flatnonzero(np.asarray(positions, dtype=np.bool_)):
+        token_id = int(flat[int(pos)])
+        if 0 <= token_id < text_vocab_size and token_id not in control_token_ids():
+            out.append(token_id)
+    return out
+
+
+def decode_input_text(input_main: list[int]) -> str:
+    try:
+        start = input_main.index(token_ids_text_in) + 1
+    except ValueError:
+        start = 0
+    stop_ids = {
+        token_ids_user_end,
+        token_ids_model,
+        token_ids_model_end,
+        token_ids_session_end,
+        token_ids_audio_in,
+        token_ids_audio_out,
+        token_ids_image_in,
+        token_ids_image_out,
+    }
+    text_ids: list[int] = []
+    for token_id in input_main[start:]:
+        token_i = int(token_id)
+        if token_i in stop_ids:
+            break
+        if 0 <= token_i < text_vocab_size and token_i not in control_token_ids():
+            text_ids.append(token_i)
+    return decode_text_token_ids_for_eval(text_ids)
+
+
+def source_info_for_stream_id(stream_id: int) -> tuple[int | None, int | None]:
+    stream_i = int(stream_id)
+    if stream_i < 1_000_000_000:
+        return None, stream_i
+    return int(stream_i // 1_000_000_000) - 1, int(stream_i % 1_000_000_000)
+
+
+def dataset_spec_for_source(source_idx: int | None) -> dict[str, Any] | None:
+    if source_idx is None:
+        return None
+    specs = parse_dataset_mix()
+    if 0 <= int(source_idx) < len(specs):
+        return specs[int(source_idx)]
+    return None
+
+
+def validation_source_row(source_idx: int, row_idx: int) -> dict[str, Any] | None:
+    spec = dataset_spec_for_source(source_idx)
+    if spec is None:
+        return None
+    split = split_for_dataset_spec(spec, "val")
+    try:
+        ds = load_dataset_from_spec(spec, split)
+        ds = apply_same_split_partition(ds, spec, "val", split)
+        ds = apply_data_pack_partition(ds, spec, "val")
+        if split == spec.get("split") and config.validation_skip_rows is not None and hasattr(ds, "skip"):
+            ds = ds.skip(int(config.validation_skip_rows))
+        for row in safe_dataset_iter(
+            ds,
+            repeat_count=1,
+            skip_rows=int(row_idx),
+            skip_log_label=f"EvalPreview:{spec.get('name')}",
+        ):
+            return dict(row)
+    except Exception as exc:
+        log_info(
+            f"[Validation Samples] Could not reload source row for preview: "
+            f"source_idx={source_idx}, row_idx={row_idx}, error={type(exc).__name__}: {exc}"
+        )
+    return None
+
+
+def save_processed_image_preview(row: dict[str, Any], spec: dict[str, Any] | None, out_dir: Path, name: str) -> str | None:
+    array = _image_value_to_array(_extract_image_value(row, spec))
+    if array is None:
+        return None
+    try:
+        from PIL import Image
+
+        array = np.asarray(array)
+        if array.ndim == 2:
+            array = np.repeat(array[:, :, None], 3, axis=2)
+        if array.ndim != 3 or array.shape[2] < 3:
+            return None
+        if array.dtype != np.uint8:
+            array_f = np.asarray(array[:, :, :3], dtype=np.float32)
+            if array_f.size and float(np.nanmax(array_f)) <= 1.0:
+                array_f = array_f * 255.0
+            array = np.clip(array_f, 0.0, 255.0).astype(np.uint8)
+        image = Image.fromarray(array[:, :, :3], mode="RGB").resize(
+            (int(config.image_input_resolution), int(config.image_input_resolution)),
+            Image.Resampling.BILINEAR,
+        )
+        path = out_dir / f"{safe_filename(name)}_{int(config.image_input_resolution)}px.png"
+        image.save(path)
+        return str(path)
+    except Exception as exc:
+        log_info(f"[Validation Samples] Could not save image preview {name}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def validation_sample_record(
+    sample_idx: int,
+    batch_idx: int,
+    lane_idx: int,
+    chunk_index: int,
+    task_id: int,
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    weights: np.ndarray,
+    preds: np.ndarray,
+    stream_id: int,
+    out_dir: Path,
+) -> dict[str, Any]:
+    input_main = [int(x) for x in np.asarray(inputs, dtype=np.int32)[:, 0].tolist() if int(x) != token_ids_pad]
+    target_main = np.asarray(targets, dtype=np.int32)[:, 0]
+    pred_main = np.asarray(preds, dtype=np.int32)
+    weights_np = np.asarray(weights, dtype=np.float32)
+    content_mask = supervised_content_mask(target_main, weights_np)
+    supervised_mask = np.logical_and(weights_np > 0.0, target_main != int(token_ids_pad))
+    text_positions = np.logical_and(
+        content_mask,
+        np.logical_and(target_main >= 0, target_main < int(text_vocab_size)),
+    )
+    audio_positions = np.logical_and(
+        content_mask,
+        np.logical_and(target_main >= int(audio_token_start), target_main < int(audio_token_end)),
+    )
+    content_total = int(np.sum(content_mask))
+    content_correct = int(np.sum(np.logical_and(content_mask, pred_main == target_main)))
+    supervised_total = int(np.sum(supervised_mask))
+    supervised_correct = int(np.sum(np.logical_and(supervised_mask, pred_main == target_main)))
+    source_idx, source_row_idx = source_info_for_stream_id(stream_id)
+    spec = dataset_spec_for_source(source_idx)
+    task_name = TASK_ID_TO_NAME.get(int(task_id), f"task_{int(task_id)}")
+
+    preview_path = None
+    if task_name == "image" and source_idx is not None and source_row_idx is not None:
+        row = validation_source_row(int(source_idx), int(source_row_idx))
+        if row is not None:
+            preview_path = save_processed_image_preview(
+                row,
+                spec,
+                out_dir,
+                f"validation_image_{sample_idx:02d}_source_{source_idx}_row_{source_row_idx}",
+            )
+
+    return {
+        "sample_idx": int(sample_idx),
+        "batch_idx": int(batch_idx),
+        "lane_idx": int(lane_idx),
+        "chunk_index": int(chunk_index),
+        "stream_id": int(stream_id),
+        "source_idx": source_idx,
+        "source_row_idx": source_row_idx,
+        "dataset": None if spec is None else spec.get("name"),
+        "split": None if spec is None else split_for_dataset_spec(spec, "val"),
+        "mode": None if spec is None else spec.get("mode"),
+        "task_id": int(task_id),
+        "task": task_name,
+        "input_text": decode_input_text(input_main),
+        "has_image_input": bool(any(is_image_token_id(token_id) for token_id in input_main)),
+        "image_token_count": int(sum(1 for token_id in input_main if is_image_token_id(token_id))),
+        "processed_image_path": preview_path,
+        "expected_text": decode_text_token_ids_for_eval(collect_text_tokens_from_positions(target_main, text_positions)),
+        "teacher_forced_top1_text": decode_text_token_ids_for_eval(collect_text_tokens_from_positions(pred_main, text_positions)),
+        "content_correct": content_correct,
+        "content_total": content_total,
+        "content_acc": content_correct / content_total if content_total else None,
+        "supervised_correct": supervised_correct,
+        "supervised_total": supervised_total,
+        "supervised_acc": supervised_correct / supervised_total if supervised_total else None,
+        "expected_audio_tokens": int(np.sum(audio_positions)),
+        "expected_main_tokens": [token_label(int(target_main[pos])) for pos in np.flatnonzero(supervised_mask)[:128]],
+        "teacher_forced_top1_tokens": [token_label(int(pred_main[pos])) for pos in np.flatnonzero(supervised_mask)[:128]],
+    }
+
+
 def collect_audio_target_tokens(target_frames: np.ndarray) -> list[int]:
     audio_ids: list[int] = []
     for frame in np.asarray(target_frames, dtype=np.int32):
@@ -6940,9 +7714,8 @@ def collect_text_targets_after_marker(target_main: list[int], marker: int) -> li
         token_ids_model_end,
         token_ids_session_end,
         token_ids_audio_out,
-        token_ids_audio_end,
-        token_ids_hybrid_out,
         token_ids_text_out,
+        token_ids_image_out,
     }
     out: list[int] = []
     for token_id in target_main[start:]:
@@ -7024,7 +7797,7 @@ def generate_text_after_prefix(
         token_id = sample_model_token_from_logits(logits, subkey, candidate_ids_np, config.eval_use_candidate_head)
         generated.append(token_id)
         trace.append(token_label(token_id))
-        if token_id in {token_ids_model_end, token_ids_session_end, token_ids_audio_out, token_ids_audio_end}:
+        if token_id in {token_ids_model_end, token_ids_session_end, token_ids_audio_out, token_ids_text_out, token_ids_image_out}:
             break
         logits, memories, candidate_ids_np = step_runtime(
             model,
@@ -7531,6 +8304,147 @@ def validation_composite_score(metrics: dict[str, float]) -> dict[str, float]:
     }
 
 
+def save_validation_prediction_samples(
+    model: PropagatorModel,
+    step: int,
+    out_dir: Path,
+    validation_prediction_step_fn: Any,
+) -> list[dict[str, Any]]:
+    limit = max(0, int(config.eval_validation_samples))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if limit <= 0:
+        (out_dir / "validation_samples.json").write_text("[]\n", encoding="utf-8")
+        return []
+
+    selected: list[dict[str, Any]] = []
+    overflow: list[dict[str, Any]] = []
+    task_counts: dict[int, int] = {}
+    per_task_target = max(1, int(math.ceil(limit / max(1, len(TASK_ID_TO_NAME)))))
+
+    def maybe_add(record: dict[str, Any]) -> None:
+        task_id = int(record["task_id"])
+        if len(selected) < limit and task_counts.get(task_id, 0) < per_task_target:
+            selected.append(record)
+            task_counts[task_id] = task_counts.get(task_id, 0) + 1
+        else:
+            overflow.append(record)
+
+    if config.stateful_validation:
+        sampler = StatefulChunkSampler(
+            val_stream_ids,
+            config.batch_size,
+            config.seed + 10_000,
+            source_weights=[float(spec["weight"]) for spec in parse_dataset_mix()],
+        )
+        memories = initial_memories_for_training(model, config.batch_size)
+
+        for batch_idx in range(int(config.validation_batches)):
+            indices, reset_mask_np = sampler.next_indices()
+            batch_inputs_np = np.asarray(val_input_tokens[indices], dtype=np.int32)
+            batch_targets_np = np.asarray(val_target_tokens[indices], dtype=np.int32)
+            batch_weights_np = np.asarray(val_loss_weights[indices], dtype=np.float32)
+            chunk_positions_np = np.asarray(val_chunk_positions[indices], dtype=np.int32)
+            task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
+
+            preds, memories = run_validation_prediction_step(
+                validation_prediction_step_fn,
+                model,
+                maybe_put_batch(batch_inputs_np, np.int32),
+                maybe_put_batch(batch_targets_np, np.int32),
+                memories,
+                maybe_put_vector(reset_mask_np, np.bool_),
+                maybe_put_vector(chunk_positions_np, np.int32),
+            )
+            preds_np = np.asarray(jax.device_get(preds), dtype=np.int32)
+
+            for lane_idx, chunk_index in enumerate(indices.tolist()):
+                if len(selected) >= limit and len(overflow) >= limit:
+                    break
+                if not np.any(batch_weights_np[lane_idx] > 0.0):
+                    continue
+                maybe_add(
+                    validation_sample_record(
+                        len(selected) + len(overflow),
+                        batch_idx,
+                        lane_idx,
+                        int(chunk_index),
+                        int(task_ids_np[lane_idx]),
+                        batch_inputs_np[lane_idx],
+                        batch_targets_np[lane_idx],
+                        batch_weights_np[lane_idx],
+                        preds_np[lane_idx],
+                        int(val_stream_ids[int(chunk_index)]),
+                        out_dir,
+                    )
+                )
+            if len(selected) >= limit and len(overflow) >= limit:
+                break
+    else:
+        for batch_idx in range(int(config.validation_batches)):
+            indices = validation_indices_for_batch(batch_idx)
+            batch_inputs_np = np.asarray(val_input_tokens[indices], dtype=np.int32)
+            batch_targets_np = np.asarray(val_target_tokens[indices], dtype=np.int32)
+            batch_weights_np = np.asarray(val_loss_weights[indices], dtype=np.float32)
+            chunk_positions_np = np.asarray(val_chunk_positions[indices], dtype=np.int32)
+            task_ids_np = np.asarray(val_chunk_task_ids[indices], dtype=np.int32)
+            memories = initial_memories_for_training(model, config.batch_size)
+            reset_mask_np = np.ones((int(config.batch_size),), dtype=np.bool_)
+
+            preds, _ = run_validation_prediction_step(
+                validation_prediction_step_fn,
+                model,
+                maybe_put_batch(batch_inputs_np, np.int32),
+                maybe_put_batch(batch_targets_np, np.int32),
+                memories,
+                maybe_put_vector(reset_mask_np, np.bool_),
+                maybe_put_vector(chunk_positions_np, np.int32),
+            )
+            preds_np = np.asarray(jax.device_get(preds), dtype=np.int32)
+
+            for lane_idx, chunk_index in enumerate(indices.tolist()):
+                if len(selected) >= limit and len(overflow) >= limit:
+                    break
+                if not np.any(batch_weights_np[lane_idx] > 0.0):
+                    continue
+                maybe_add(
+                    validation_sample_record(
+                        len(selected) + len(overflow),
+                        batch_idx,
+                        lane_idx,
+                        int(chunk_index),
+                        int(task_ids_np[lane_idx]),
+                        batch_inputs_np[lane_idx],
+                        batch_targets_np[lane_idx],
+                        batch_weights_np[lane_idx],
+                        preds_np[lane_idx],
+                        int(val_stream_ids[int(chunk_index)]),
+                        out_dir,
+                    )
+                )
+            if len(selected) >= limit and len(overflow) >= limit:
+                break
+
+    while len(selected) < limit and overflow:
+        selected.append(overflow.pop(0))
+    selected = selected[:limit]
+    for idx, record in enumerate(selected):
+        record["sample_idx"] = idx
+
+    artifact = {
+        "step": int(step),
+        "kind": "teacher_forced_validation_samples",
+        "note": (
+            "Samples are selected from the same validation sampler used for metrics. "
+            "Predictions are per-target top-1 under teacher forcing, not free-running generation."
+        ),
+        "samples": selected,
+    }
+    path = out_dir / "validation_samples.json"
+    path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    log_info(f"[Validation Samples] Wrote {len(selected)} teacher-forced samples to {path}")
+    return selected
+
+
 def run_validation(
     model: PropagatorModel,
     step: int,
@@ -7873,6 +8787,8 @@ def infer_device_hbm_bytes() -> int:
 
     devices = jax.devices()
     kind = str(getattr(devices[0], "device_kind", "")).lower() if devices else ""
+    if "v6e" in kind:
+        return 32 * 1024**3
     if "v5e" in kind or "v5litepod" in kind:
         return 16 * 1024**3
     if "tpu" in str(devices[0]).lower() or "v4" in kind or "v5" in kind:
@@ -7906,12 +8822,22 @@ def choose_auto_batch_size(model: PropagatorModel) -> int:
     )
     activation_margin = max(1.5, 1.0 + int(config.train_unroll_len) / 64.0)
     per_sample_bytes = int(recurrent_bytes_per_sample * activation_margin)
+    scan_matrix_bytes_per_sample = (
+        int(config.num_layers)
+        * int(config.train_unroll_len)
+        * int(config.memory_key_size)
+        * int(config.memory_value_size)
+        * np.dtype(np.float32).itemsize
+    )
     available_for_batch = target_bytes - fixed_training_bytes
 
     if available_for_batch <= 0:
         raw_per_device = max(1, int(config.auto_batch_multiple_per_device))
     else:
         raw_per_device = max(1, available_for_batch // max(1, per_sample_bytes))
+    scan_target_bytes = min(target_bytes, int(hbm_bytes * 0.45))
+    raw_scan_per_device = max(1, scan_target_bytes // max(1, scan_matrix_bytes_per_sample))
+    raw_per_device = min(raw_per_device, raw_scan_per_device)
 
     max_per_device = max(1, int(config.auto_batch_max_per_device))
     multiple = max(1, int(config.auto_batch_multiple_per_device))
@@ -7921,7 +8847,9 @@ def choose_auto_batch_size(model: PropagatorModel) -> int:
     log_info(
         f"[Batch] Auto batch_size={batch_size} ({per_device}/device, devices={device_count}, "
         f"hbm={hbm_bytes / 1024**3:.1f}GiB, target={target_bytes / 1024**3:.1f}GiB, "
-        f"fixed_est={fixed_training_bytes / 1024**3:.1f}GiB, per_sample_est={per_sample_bytes / 1024**2:.1f}MiB)"
+        f"fixed_est={fixed_training_bytes / 1024**3:.1f}GiB, per_sample_est={per_sample_bytes / 1024**2:.1f}MiB, "
+        f"scan_matrix_per_sample={scan_matrix_bytes_per_sample / 1024**3:.2f}GiB, "
+        f"scan_target={scan_target_bytes / 1024**3:.1f}GiB)"
     )
     return batch_size
 
@@ -7986,6 +8914,16 @@ def write_edge_memory_report(model: PropagatorModel, output_root: Path) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "edge_memory_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     log_info(f"Edge memory report: {json.dumps(report, ensure_ascii=False)}")
+
+
+def enforce_output_param_family(model: PropagatorModel, output_root: Path) -> None:
+    params, _ = estimate_param_bytes(model)
+    output_name = str(output_root).lower()
+    if "_1b" in output_name and params < 1_000_000_000:
+        raise ValueError(
+            f"Output root {output_root} is marked as 1B, but the model has only {params:,} parameters. "
+            "Use a >=1B full-size config or choose a non-_1b output root for compact presets."
+        )
 
 
 def copytree_replace(src: Path, dst: Path) -> None:
@@ -8267,8 +9205,8 @@ def load_train_loss_history(output_root: Path, max_step: int) -> tuple[list[int]
 def init_global_token_ids() -> None:
     global token_ids_pad, token_ids_unk, token_ids_session, token_ids_user, token_ids_model
     global token_ids_listen, token_ids_user_end, token_ids_model_end, token_ids_session_end, token_ids_user_interrupt
-    global token_ids_audio_in, token_ids_audio_out, token_ids_audio_end, token_ids_silence, token_ids_text_in, token_ids_text_out
-    global token_ids_hybrid_out, token_ids_image_in
+    global token_ids_audio_in, token_ids_audio_out, token_ids_silence, token_ids_text_in, token_ids_text_out
+    global token_ids_image_in, token_ids_image_out
 
     token_ids_pad = token_ids["pad"]
     token_ids_unk = token_ids["unk"]
@@ -8282,12 +9220,11 @@ def init_global_token_ids() -> None:
     token_ids_user_interrupt = token_ids["user_interrupt"]
     token_ids_audio_in = token_ids["audio_in"]
     token_ids_audio_out = token_ids["audio_out"]
-    token_ids_audio_end = token_ids["audio_end"]
     token_ids_silence = token_ids["silence"]
     token_ids_text_in = token_ids["text_in"]
     token_ids_text_out = token_ids["text_out"]
-    token_ids_hybrid_out = token_ids["hybrid_out"]
     token_ids_image_in = token_ids["image_in"]
+    token_ids_image_out = token_ids["image_out"]
 
 
 def main() -> None:
@@ -8380,6 +9317,7 @@ def main() -> None:
     prune_local_checkpoint_dirs(output_root)
 
     model = PropagatorModel(config, vocab_size, nnx.Rngs(config.seed))
+    enforce_output_param_family(model, output_root)
     if int(config.batch_size) <= 0:
         config = config.model_copy(update={"batch_size": choose_auto_batch_size(model)})
     elif len(jax.devices()) > 1 and config.enable_data_sharding and int(config.batch_size) % len(jax.devices()) != 0:
@@ -8513,6 +9451,7 @@ def main() -> None:
 
     train_step_stateful_fn = build_train_step_stateful()
     validation_step_stateful_fn = build_validation_step_stateful()
+    validation_prediction_step_fn = build_validation_prediction_step()
 
     pbar = progress_bar(range(start_step, total_steps), desc="Training", initial=start_step, total=total_steps)
     train_wall_start = time.time()
@@ -8581,10 +9520,17 @@ def main() -> None:
             ce_loss_val = train_step_stateless(model, optimizer, batch_inputs, batch_targets, batch_weights)
 
         act_step = step + 1
+        should_graceful_shutdown = shutdown_requested()
+        if should_graceful_shutdown:
+            log_info(f"[Signal] Graceful shutdown requested at step {act_step}; saving checkpoint before exit.")
+        should_log_train_progress = config.train_log_every > 0 and (
+            act_step == start_step + 1 or act_step % config.train_log_every == 0
+        )
         should_record_train_loss = (
-            (config.train_log_every > 0 and act_step % config.train_log_every == 0)
+            should_log_train_progress
             or (config.eval_every > 0 and act_step % config.eval_every == 0)
             or act_step == total_steps
+            or should_graceful_shutdown
         )
         if should_record_train_loss:
             latest_train_loss = float(ce_loss_val)
@@ -8592,7 +9538,7 @@ def main() -> None:
             train_losses.append(latest_train_loss)
             pbar.set_postfix({"loss": f"{latest_train_loss:.4f}"})
 
-        if config.train_log_every > 0 and act_step % config.train_log_every == 0:
+        if should_log_train_progress:
             now = time.time()
             elapsed = max(1e-6, now - train_wall_start)
             completed = act_step - start_step
@@ -8624,7 +9570,7 @@ def main() -> None:
             last_train_log_time = now
             last_train_log_step = act_step
 
-        if act_step % config.eval_every == 0:
+        if (not should_graceful_shutdown) and config.eval_every > 0 and act_step % config.eval_every == 0:
             for attempt in (0, 1):
                 try:
                     v_loss, v_metrics = run_validation(model, act_step, validation_step_stateful_fn)
@@ -8638,6 +9584,7 @@ def main() -> None:
                     if (not is_jit_sharding_error) or attempt == 1:
                         raise
                     validation_step_stateful_fn = build_validation_step_stateful()
+                    validation_prediction_step_fn = build_validation_prediction_step()
                     log_info(
                         f"[Validation] Retrying stateful validation at global step {act_step} after jit sharding mismatch "
                         f"#{attempt + 1}: {msg.splitlines()[0]}"
@@ -8730,23 +9677,12 @@ def main() -> None:
                 act_step,
             )
 
-            text_meta = generate_text_eval_samples(
+            validation_samples = save_validation_prediction_samples(
                 model,
-                config.seed + 30_000,
+                act_step,
                 out_dir,
-                use_candidate_head=config.eval_use_candidate_head,
+                validation_prediction_step_fn,
             )
-            image_meta = generate_image_eval_samples(
-                model,
-                config.seed + 40_000,
-                out_dir,
-                use_candidate_head=config.eval_use_candidate_head,
-            )
-            audio_meta = None
-            audio_input_meta = None
-            if config.enable_audio and config.eval_audio_every > 0 and act_step % config.eval_audio_every == 0:
-                audio_meta = generate_audio_evals(model, config.seed + 99_000, out_dir)
-                audio_input_meta = generate_audio_input_evals(model, config.seed + 199_000, out_dir)
 
             (out_dir / "validation_metrics.json").write_text(
                 json.dumps(v_metrics, ensure_ascii=False, indent=2) + "\n",
@@ -8759,10 +9695,7 @@ def main() -> None:
                     "train_loss": train_losses[-1] if train_losses else float("nan"),
                     "val_loss": v_loss,
                     "metrics": v_metrics,
-                    "text_eval": text_meta,
-                    "image_eval": image_meta,
-                    "audio_eval": audio_meta,
-                    "audio_input_eval": audio_input_meta,
+                    "validation_samples": validation_samples,
                     "time": time.time(),
                 },
             )
@@ -8774,27 +9707,19 @@ def main() -> None:
                 f"without_improvement={evals_without_improvement}/{config.early_stopping_patience}"
             )
             log_info(json.dumps(v_metrics, ensure_ascii=False, indent=2))
-            if audio_meta is not None:
-                audio_summary = [
-                    {k: item[k] for k in ("sample_idx", "num_generated_tokens", "num_audio_tokens", "decode_error", "wav_path")}
-                    for item in audio_meta
-                ]
-                log_info(f"[Audio Eval] {json.dumps(audio_summary, ensure_ascii=False)}")
-            if audio_input_meta is not None:
-                input_summary = {
-                    "asr_samples": len(audio_input_meta.get("asr", [])),
-                    "audio_to_audio_samples": len(audio_input_meta.get("audio_to_audio", [])),
-                }
-                log_info(f"[Audio Input Eval] {json.dumps(input_summary, ensure_ascii=False)}")
-            log_info(f"[Sample] wrote {len(text_meta)} text samples to {out_dir}")
-            log_info(f"[Image Eval] wrote {len(image_meta)} image samples to {out_dir}")
+            log_info(f"[Validation Samples] wrote {len(validation_samples)} samples to {out_dir}")
 
-        if act_step % config.checkpoint_every == 0 or act_step == total_steps or should_early_stop:
+        if (
+            (config.checkpoint_every > 0 and act_step % config.checkpoint_every == 0)
+            or act_step == total_steps
+            or should_early_stop
+            or should_graceful_shutdown
+        ):
             ckpt_dir = output_root / f"step_{act_step}"
             save_checkpoint(checkpointer, model, optimizer, ckpt_dir)
             checkpoint_backup_ok = True
             if gcs_backup_enabled() and config.gcs_sync_every > 0 and (
-                act_step % config.gcs_sync_every == 0 or should_early_stop
+                act_step % config.gcs_sync_every == 0 or should_early_stop or should_graceful_shutdown
             ):
                 try:
                     sync_checkpoint_to_gcs(act_step, ckpt_dir)
@@ -8807,9 +9732,13 @@ def main() -> None:
                 log_info("[Checkpoint] Local checkpoint pruning skipped because GCS checkpoint backup failed")
 
         if gcs_backup_enabled() and config.gcs_sync_every > 0 and (
-            act_step % config.gcs_sync_every == 0 or should_early_stop
+            act_step % config.gcs_sync_every == 0 or should_early_stop or should_graceful_shutdown
         ):
             start_gcs_backup(act_step, output_root / f"step_{act_step}")
+
+        if should_graceful_shutdown:
+            log_info(f"[Signal] Graceful shutdown complete at step {act_step}; signal={_SHUTDOWN_SIGNAL}")
+            break
 
         if should_early_stop:
             log_info(

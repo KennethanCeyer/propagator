@@ -312,11 +312,11 @@ Previous 586M-run eval retained for comparison, completed at step 1,020,000:
 | :---: | :---: |
 | ![Composite Score](assets/val_composite_score.png) | ![Image Task Accuracy](assets/val_image_task_acc.png) |
 
-The image metric is teacher-forced token accuracy, not exact-match generation. The archived image-generation probes did not save their source pixels, so the README does not show image media for this checkpoint.
+Validation metrics are teacher-forced measurements on held-out dataset pairs. Free-running probes are not used as evaluation results.
 
 ## Output Examples
 
-These examples are from the previous 586M run's step 1,020,000 runtime loop. Protocol control is better than the earlier checkpoints, while open-ended output is still rough.
+These examples are from the previous 586M run's step 1,020,000 runtime loop and are kept only as qualitative protocol traces.
 
 | Probe | Input | Model output |
 | :--- | :--- | :--- |
@@ -324,11 +324,6 @@ These examples are from the previous 586M run's step 1,020,000 runtime loop. Pro
 | Format following | `Answer with one word:` + `is water wet?` | `No.` |
 | Turn boundary | user speech followed by `[USER_END]` | switches to `[MODEL]` then `[TEXT_OUTPUT]` |
 | Interruption-like input | user continues speaking without `[USER_END]` | response stream is not started |
-
-| Archived generation probe | Input | Generated answer |
-| :--- | :--- | :--- |
-| `red_mug` | synthetic image-token probe + `What object is visible?` | `parasail` |
-| `blue_car` | synthetic image-token probe + `What color is the car?` | `yellow` |
 
 | Audio prompt | Rendered sample | Notes |
 | :--- | :---: | :--- |
