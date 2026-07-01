@@ -654,6 +654,29 @@ val_stream_ids: np.ndarray
 val_chunk_positions: np.ndarray
 val_chunk_task_ids: np.ndarray
 
+
+@dataclass
+class FixedDatasetEvalCase:
+    sample_idx: int
+    name: str
+    source_idx: int
+    row_idx: int
+    dataset: str
+    split: str
+    mode: str
+    input_main: list[int]
+    target_main: list[int]
+    prefix: list[int]
+    input_text: str
+    expected_text_ids: list[int]
+    expected_audio_tokens: int
+    has_image_input: bool
+    image_token_count: int
+    image_preview_rgb: np.ndarray | None
+
+
+_fixed_dataset_eval_cases_cache: list[FixedDatasetEvalCase] | None = None
+
 token_ids_pad: int
 token_ids_unk: int
 token_ids_session: int
@@ -6833,7 +6856,11 @@ def validation_source_row(source_idx: int, row_idx: int) -> dict[str, Any] | Non
     return None
 
 
-def save_processed_image_preview(row: dict[str, Any], spec: dict[str, Any] | None, out_dir: Path, name: str) -> str | None:
+def processed_image_preview_array(
+    row: dict[str, Any],
+    spec: dict[str, Any] | None,
+    name: str,
+) -> np.ndarray | None:
     array = _image_value_to_array(_extract_image_value(row, spec))
     if array is None:
         return None
@@ -6854,12 +6881,28 @@ def save_processed_image_preview(row: dict[str, Any], spec: dict[str, Any] | Non
             (int(config.image_input_resolution), int(config.image_input_resolution)),
             Image.Resampling.BILINEAR,
         )
+        return np.asarray(image, dtype=np.uint8)
+    except Exception as exc:
+        log_info(f"[Validation Samples] Could not prepare image preview {name}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def write_processed_image_preview(array: np.ndarray | None, out_dir: Path, name: str) -> str | None:
+    if array is None:
+        return None
+    try:
+        from PIL import Image
+
         path = out_dir / f"{safe_filename(name)}_{int(config.image_input_resolution)}px.png"
-        image.save(path)
+        Image.fromarray(np.asarray(array, dtype=np.uint8), mode="RGB").save(path)
         return str(path)
     except Exception as exc:
         log_info(f"[Validation Samples] Could not save image preview {name}: {type(exc).__name__}: {exc}")
         return None
+
+
+def save_processed_image_preview(row: dict[str, Any], spec: dict[str, Any] | None, out_dir: Path, name: str) -> str | None:
+    return write_processed_image_preview(processed_image_preview_array(row, spec, name), out_dir, name)
 
 
 def collect_audio_target_tokens(target_frames: np.ndarray) -> list[int]:
@@ -6960,13 +7003,13 @@ def write_eval_trace(path: Path, record: dict[str, Any]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def generate_fixed_dataset_eval_samples(
-    model: PropagatorModel,
-    seed: int,
-    out_dir: Path,
-) -> list[dict[str, Any]]:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    records: list[dict[str, Any]] = []
+def prepare_fixed_dataset_eval_cases() -> list[FixedDatasetEvalCase]:
+    global _fixed_dataset_eval_cases_cache
+
+    if _fixed_dataset_eval_cases_cache is not None:
+        return _fixed_dataset_eval_cases_cache
+
+    prepared: list[FixedDatasetEvalCase] = []
     for idx, case in enumerate(parse_eval_dataset_cases()):
         source_idx = int(case["source_idx"])
         row_idx = int(case["row_idx"])
@@ -6977,71 +7020,121 @@ def generate_fixed_dataset_eval_samples(
         if row is None:
             continue
         try:
-            in_ids, tr_ids, row_weights, _ = tokenize_row_by_mode(row, str(spec.get("mode", config.dataset_mode)), spec)
+            in_ids, tr_ids, _, _ = tokenize_row_by_mode(row, str(spec.get("mode", config.dataset_mode)), spec)
         except Exception as exc:
             log_info(
                 f"[Eval Samples] Skipping fixed dataset case {case['name']}: "
                 f"source_idx={source_idx}, row_idx={row_idx}, error={type(exc).__name__}: {exc}"
             )
             continue
+
         input_main = main_tokens(in_ids)
         target_main = main_tokens(tr_ids)
         if token_ids_model not in input_main:
+            log_info(
+                f"[Eval Samples] Skipping fixed dataset case {case['name']}: "
+                f"source_idx={source_idx}, row_idx={row_idx}, reason=missing_model_marker"
+            )
             continue
+
         model_pos = input_main.index(token_ids_model)
         prefix = input_main[: model_pos + 1]
-        generated, trace = generate_text_after_prefix(model, seed + idx, prefix, int(config.sample_gen_len))
-        expected_text_ids = collect_text_targets_after_marker(target_main, token_ids_text_out)
-        expected_audio_tokens = target_audio_token_count(tr_ids)
+        has_image_input = bool(any(is_image_token_id(token_id) for token_id in input_main))
+        image_preview_rgb = None
+        if has_image_input:
+            image_preview_rgb = processed_image_preview_array(
+                row,
+                spec,
+                f"eval_image_{idx:02d}_source_{source_idx}_row_{row_idx}",
+            )
+        prepared.append(
+            FixedDatasetEvalCase(
+                sample_idx=idx,
+                name=str(case["name"]),
+                source_idx=source_idx,
+                row_idx=row_idx,
+                dataset=str(spec.get("name")),
+                split=split_for_dataset_spec(spec, "val"),
+                mode=str(spec.get("mode")),
+                input_main=input_main,
+                target_main=target_main,
+                prefix=prefix,
+                input_text=decode_input_text(input_main),
+                expected_text_ids=collect_text_targets_after_marker(target_main, token_ids_text_out),
+                expected_audio_tokens=target_audio_token_count(tr_ids),
+                has_image_input=has_image_input,
+                image_token_count=int(sum(1 for token_id in input_main if is_image_token_id(token_id))),
+                image_preview_rgb=image_preview_rgb,
+            )
+        )
+
+    _fixed_dataset_eval_cases_cache = prepared
+    log_info(f"[Eval Samples] Prepared {len(prepared)} fixed dataset samples from validation rows")
+    return prepared
+
+
+def generate_fixed_dataset_eval_samples(
+    model: PropagatorModel,
+    seed: int,
+    out_dir: Path,
+) -> list[dict[str, Any]]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+    for case in prepare_fixed_dataset_eval_cases():
+        generated, trace = generate_text_after_prefix(
+            model,
+            seed + case.sample_idx,
+            case.prefix,
+            int(config.sample_gen_len),
+        )
 
         generated_audio_tokens: list[int] = []
         wav_path: str | None = None
         audio_decode_error = None
-        if expected_audio_tokens > 0:
-            audio_prefix = [*prefix, token_ids_audio_out]
+        if case.expected_audio_tokens > 0:
+            audio_prefix = [*case.prefix, token_ids_audio_out]
             generated_audio_tokens, audio_trace = generate_audio_after_prefix(
                 model,
-                seed + 10_000 + idx,
+                seed + 10_000 + case.sample_idx,
                 audio_prefix,
                 int(config.eval_audio_tokens),
             )
             trace = [*trace[:64], "[AUDIO_OUTPUT]", *audio_trace[:128]]
             raw_audio, sample_rate, audio_decode_error = decode_audio_token_ids_to_waveform(generated_audio_tokens)
             audio, _ = normalize_audio_for_eval(raw_audio)
-            wav = out_dir / f"eval_audio_{idx:02d}_{safe_filename(case['name'])}.wav"
+            wav = out_dir / f"eval_audio_{case.sample_idx:02d}_{safe_filename(case.name)}.wav"
             write_wav(wav, audio, sample_rate)
             wav_path = str(wav)
 
         preview_path = None
-        if any(is_image_token_id(token_id) for token_id in input_main):
-            preview_path = save_processed_image_preview(
-                row,
-                spec,
+        if case.has_image_input:
+            preview_path = write_processed_image_preview(
+                case.image_preview_rgb,
                 out_dir,
-                f"eval_image_{idx:02d}_source_{source_idx}_row_{row_idx}",
+                f"eval_image_{case.sample_idx:02d}_source_{case.source_idx}_row_{case.row_idx}",
             )
 
         record = {
-            "sample_idx": idx,
-            "name": case["name"],
-            "source_idx": source_idx,
-            "row_idx": row_idx,
-            "dataset": spec.get("name"),
-            "split": split_for_dataset_spec(spec, "val"),
-            "mode": spec.get("mode"),
-            "input_text": decode_input_text(input_main),
-            "has_image_input": bool(any(is_image_token_id(token_id) for token_id in input_main)),
-            "image_token_count": int(sum(1 for token_id in input_main if is_image_token_id(token_id))),
+            "sample_idx": case.sample_idx,
+            "name": case.name,
+            "source_idx": case.source_idx,
+            "row_idx": case.row_idx,
+            "dataset": case.dataset,
+            "split": case.split,
+            "mode": case.mode,
+            "input_text": case.input_text,
+            "has_image_input": case.has_image_input,
+            "image_token_count": case.image_token_count,
             "processed_image_path": preview_path,
-            "expected_text": decode_text_token_ids_for_eval(expected_text_ids),
+            "expected_text": decode_text_token_ids_for_eval(case.expected_text_ids),
             "generated_text": decode_text_token_ids_for_eval(generated),
             "generated_tokens": [token_label(token_id) for token_id in generated[:128]],
-            "expected_audio_tokens": int(expected_audio_tokens),
+            "expected_audio_tokens": int(case.expected_audio_tokens),
             "generated_audio_tokens": int(sum(1 for token_id in generated_audio_tokens if is_audio_token_id(token_id))),
             "wav_path": wav_path,
             "audio_decode_error": audio_decode_error,
             "trace": trace[:192],
-            "path": str(out_dir / f"eval_sample_{idx:02d}_{safe_filename(case['name'])}.txt"),
+            "path": str(out_dir / f"eval_sample_{case.sample_idx:02d}_{safe_filename(case.name)}.txt"),
         }
         write_eval_trace(Path(record["path"]), record)
         records.append(record)
