@@ -19,20 +19,6 @@ ADJECTIVES = ["quiet", "bright", "rainy", "early", "crowded", "warm", "formal", 
 DAYS = list(range(1, 29))
 HOURS = list(range(8, 20))
 
-SCENE_OBJECTS = [
-    "a red mug",
-    "a receipt",
-    "a notebook",
-    "blue keys",
-    "a library card",
-    "a train ticket",
-    "a grocery bag",
-    "a small shovel",
-    "a coffee mug",
-    "a shopping cart",
-    "a stack of books",
-]
-
 FORMAT_CATALOG = [
     "json",
     "yaml",
@@ -65,19 +51,6 @@ def row_json(*, idx: int, user: str, assistant: str, task: str | None = None, in
         payload["task"] = task
     if interrupt:
         payload["allow_user_interrupts"] = True
-    return payload
-
-
-def image_row(*, idx: int, image_text: str, question: str, answer: str, task: str | None = None) -> dict:
-    payload: dict[str, object] = {
-        "image_text": image_text,
-        "question": question,
-        "answer": answer,
-        "image_text_key": "image_text",
-    }
-    if task:
-        payload["task"] = task
-    payload["question"] = with_request_id(idx, question)
     return payload
 
 
@@ -190,60 +163,6 @@ def obj_phrase(a: int, b: int) -> str:
     return f"{a} + {b} items"
 
 
-def image_rows(rng: random.Random, start: int, count: int) -> list[dict]:
-    rows: list[dict] = []
-    for i in range(start, start + count):
-        place = sample_from(PLACES, rng)
-        obj = sample_from(SCENE_OBJECTS, rng)
-        mood = sample_from(MOODS, rng)
-        city = sample_from(CITIES, rng)
-        day = sample_from(DAYS, rng)
-        hour = sample_from(HOURS, rng)
-        detail = sample_from(["chair", "lamp", "package", "door", "sign", "ticket gate"], rng)
-        image_text = f"{mood} {place} scene with {obj} and a {detail}."
-        question = f"What is the visible object in image note {i}? include only the object name."
-        answer = obj.split()[1] if " " in obj else obj
-        if i % 2 == 0:
-            rows.append(image_row(idx=i, image_text=image_text, question=question, answer=answer, task="image_recognition"))
-        else:
-            rows.append(
-                {
-                    "image_text": image_text,
-                    "question": f"In this image note {i}, where is the {detail}? choose: {place} / hallway / storage.",
-                    "answer": place,
-                    "task": "image_scene_reasoning",
-                }
-            )
-    return rows
-
-
-def text_image_rows(rng: random.Random, start: int, count: int) -> list[dict]:
-    rows: list[dict] = []
-    for i in range(start, start + count):
-        noun = sample_from(OBJECTS, rng)
-        place = sample_from(PLACES, rng)
-        city = sample_from(CITIES, rng)
-        image_text = f"A {sample_from(ADJECTIVES, rng)} {noun} is visible near a {place} counter in {city}."
-        user = f"From the image notes and caption: what object should be brought home?"
-        if i % 3 == 0:
-            question = "Answer with one lowercase word only."
-            answer = noun.split()[0]
-        elif i % 3 == 1:
-            question = "Answer with one location word only."
-            answer = place
-        else:
-            question = "Answer with a short noun phrase."
-            answer = f"{noun} in {place}"
-        question = with_request_id(i, question)
-        rows.append({
-            "image_text": image_text,
-            "question": question,
-            "answer": answer,
-            "task": "text_image_recognition",
-        })
-    return rows
-
-
 def interruption_rows(rng: random.Random, start: int, count: int) -> list[dict]:
     rows: list[dict] = []
     for i in range(start, start + count):
@@ -307,13 +226,11 @@ def build_rows(count: int) -> list[dict]:
     rows: list[dict] = []
     total = count
     allocations = {
-        "format": max(1, int(0.24 * total)),
-        "extract": max(1, int(0.16 * total)),
-        "memory": max(1, int(0.16 * total)),
-        "reason": max(1, int(0.16 * total)),
-        "image": max(1, int(0.12 * total)),
-        "text_image": max(1, int(0.10 * total)),
-        "interrupt": max(1, int(0.08 * total)),
+        "format": max(1, int(0.28 * total)),
+        "extract": max(1, int(0.18 * total)),
+        "memory": max(1, int(0.18 * total)),
+        "reason": max(1, int(0.18 * total)),
+        "interrupt": max(1, int(0.10 * total)),
         "concept": 0,
     }
     used = sum(allocations.values())
@@ -328,10 +245,6 @@ def build_rows(count: int) -> list[dict]:
     idx += allocations["memory"]
     rows.extend(arithmetic_and_classification_rows(rng, idx, allocations["reason"]))
     idx += allocations["reason"]
-    rows.extend(image_rows(rng, idx, allocations["image"]))
-    idx += allocations["image"]
-    rows.extend(text_image_rows(rng, idx, allocations["text_image"]))
-    idx += allocations["text_image"]
     rows.extend(interruption_rows(rng, idx, allocations["interrupt"]))
     idx += allocations["interrupt"]
     rows.extend(architecture_control_rows(rng, idx, allocations["concept"]))
@@ -344,7 +257,7 @@ def build_rows(count: int) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build diverse post-train JSONL data.")
     parser.add_argument("--rows", type=int, default=10_000)
-    parser.add_argument("--output", type=Path, default=Path("data/propagator_posttrain_10k.jsonl"))
+    parser.add_argument("--output", type=Path, default=Path("data/datasets/propagator_posttrain_generated.jsonl"))
     args = parser.parse_args()
     output = args.output
     output.parent.mkdir(parents=True, exist_ok=True)

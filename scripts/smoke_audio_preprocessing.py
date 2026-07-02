@@ -111,7 +111,7 @@ def main() -> None:
         elif task == "audio":
             assert train.token_ids_audio_out in target_main
         else:
-            assert train.token_ids_hybrid_out in target_main
+            assert train.token_ids_text_out in target_main
             assert train.token_ids_audio_out in target_main
     print(
         f"smoke_audio_preprocessing: PASS backend={backend} "

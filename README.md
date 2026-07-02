@@ -13,7 +13,7 @@
 </p>
 
 > [!NOTE]
-> This project documents an active research run. Training is still in progress, so the final evaluation results, examples, and demos may change and will be updated after training completes.
+> This repository tracks an active research implementation. Checked-in plots and evaluation assets are snapshots, not final benchmark results.
 
 Propagator is a JAX-based streaming language and speech model architecture using a persistent, fixed-size matrix for memory. Transformer models store a growing history of keys and values in a KV cache. Propagator compresses this data into a static recurrent matrix state during each forward pass. This gives inference a constant-size memory state per layer instead of a token-length KV cache, at the cost of lossy compression.
 
@@ -21,7 +21,7 @@ The current experimental run is a multimodal duplex model trained on text dialog
 
 ## Current Snapshot
 
-The active 1B run is separate from the archive shown below. The plots, metrics, and examples in this README are from the previous 586M archive at step 1,000,000.
+The default training configuration targets the 1B-family multimodal run. Historical plots in `assets/` are retained as comparison snapshots only.
 
 | Item | Value |
 | :--- | :--- |
@@ -34,34 +34,32 @@ The active 1B run is separate from the archive shown below. The plots, metrics, 
 | Tokenizer | 16k byte-level BPE plus protocol/audio tokens |
 | Audio codec | Mimi, 24 kHz, 8 codebooks x 2048 codes at 12.5 Hz |
 | Precision | bfloat16 training |
-| Optimizer | AdamW, peak LR 1e-4, 5k warmup, 0.01 weight decay in the corrective training script |
+| Optimizer | AdamW, peak LR 1e-4, 5k warmup, 0.01 weight decay |
 
 The run is still a research prototype. Turn-taking and output-mode control are already learnable, but generated language quality is uneven and exact audio-codebook accuracy remains low.
 
-For the 1B line, the next target is to keep the same fixed validation examples while scaling capacity. Distillation should come after the larger run has stable protocol behavior, using the 1B model as a teacher for a smaller edge-oriented checkpoint.
+For the 1B line, the next target is to keep validation sources fixed while scaling capacity. Distillation should come after the larger run has stable protocol behavior, using the 1B model as a teacher for a smaller edge-oriented checkpoint.
 
 ## Training Data
 
-The current run trains from a source-aware multimodal mixture defined in `data/mixes/propagator_dataset_mix.json`. Local JSONL datasets live under `data/datasets/`; sampling plans and weights live under `data/mixes/`. The mix combines public text, instruction, dialogue, ASR, TTS, paired speech-dialogue, and a small local identity set for model-name consistency without letting identity rows dominate the sampler.
+The current run trains from a source-aware multimodal mixture defined in `data/mixes/propagator_dataset_mix.json`. Local JSONL datasets live under `data/datasets/`; sampling plans and weights live under `data/mixes/`.
 
-The weights below are sampling weights used by the training pipeline, not exact final token percentages. The current training mix contains `977,638,592` packed training tokens; audio rows also carry parallel Mimi codebook lanes internally, so this is the sequence-token count used for training.
+The weights below are relative sampler weights that the loader normalizes internally, not final token percentages. Packed token totals are produced by the cache/tokenization step for the exact run configuration.
 
-| Source | Description | Type | Weight | Tokens |
-| :--- | :--- | :--- | ---: | ---: |
-| [`KurtDu/EchoX-Dialogues-Plus`](https://huggingface.co/datasets/KurtDu/EchoX-Dialogues-Plus) (`S2S-QA/AudioQA`) | Paired speech-dialogue turns | Hybrid speech dialogue | 0.18 | `124,521,472` |
-| [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | Educational web text | Text pretraining | 0.15 | `285,292,960` |
-| [`xinrongzhang2022/Duplex-UltraChat`](https://huggingface.co/datasets/xinrongzhang2022/Duplex-UltraChat) | Text dialogue and turn-taking | Text dialogue | 0.10 | `242,788,416` |
-| [`blabble-io/libritts_r`](https://huggingface.co/datasets/blabble-io/libritts_r) | Clean read speech | TTS / ASR | 0.08 | `34,143,712` |
-| [`facebook/voxpopuli`](https://huggingface.co/datasets/facebook/voxpopuli) | Real-world spoken transcripts | ASR | 0.07 | `62,663,712` |
-| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.clean.360`) | Clean audiobook speech | ASR / TTS | 0.06 | `37,259,904` |
-| [`openslr/librispeech_asr`](https://huggingface.co/datasets/openslr/librispeech_asr) (`train.other.500`) | Noisier audiobook speech | ASR / TTS | 0.06 | `55,950,016` |
-| [`edinburghcstr/ami`](https://huggingface.co/datasets/edinburghcstr/ami) | Meeting speech | ASR | 0.06 | `20,093,024` |
-| [`distil-whisper/librispeech_asr`](https://huggingface.co/datasets/distil-whisper/librispeech_asr) | LibriSpeech-derived speech | ASR / TTS | 0.06 | `10,938,176` |
-| [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | Encyclopedic text | Text pretraining | 0.05 | `99,042,112` |
-| [`google/fleurs`](https://huggingface.co/datasets/google/fleurs) (`en_us`) | Multispeaker English speech | ASR / TTS | 0.04 | `916,064` |
-| [`data/datasets/propagator_identity.jsonl`](data/datasets/propagator_identity.jsonl) | Propagator identity examples | Text dialogue | 0.04 | `947,200` |
-| [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | Instruction-response examples | Instruction tuning | 0.03 | `2,915,040` |
-| [`PolyAI/minds14`](https://huggingface.co/datasets/PolyAI/minds14) (`en-US`) | Short intent utterances | ASR | 0.02 | `166,784` |
+| Source | Description | Type | Weight |
+| :--- | :--- | :--- | ---: |
+| [`data/datasets/propagator_instruction_balanced_seed.jsonl`](data/datasets/propagator_instruction_balanced_seed.jsonl) | Local constrained-format and instruction rows | Text dialogue | 0.10 |
+| [`data/datasets/propagator_identity.jsonl`](data/datasets/propagator_identity.jsonl) | Small model-identity consistency set | Text dialogue | 0.02 |
+| [`HuggingFaceM4/VQAv2`](https://huggingface.co/datasets/HuggingFaceM4/VQAv2) | Visual question answering | Image recognition | 0.16 |
+| [`xinrongzhang2022/Duplex-UltraChat`](https://huggingface.co/datasets/xinrongzhang2022/Duplex-UltraChat) | Text dialogue and turn-taking | Text dialogue | 0.12 |
+| [`databricks/databricks-dolly-15k`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | Instruction-response examples | Instruction tuning | 0.08 |
+| [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) | Educational web text | Text pretraining | 0.08 |
+| [`wikimedia/wikipedia`](https://huggingface.co/datasets/wikimedia/wikipedia) | Encyclopedic text | Text pretraining | 0.03 |
+| `shangeth/libritts-r-mimi-codes` | LibriTTS-R speech/text with Mimi code lanes | ASR / TTS / hybrid | 0.20 |
+| `shangeth/librispeech-mimi-codes` | LibriSpeech speech/text with Mimi code lanes | ASR / TTS / hybrid | 0.11 |
+| `shangeth/vctk-mimi-codes` | VCTK speech/text with Mimi code lanes | ASR / TTS / hybrid | 0.03 |
+| `shangeth/jenny-mimi-codes` | Jenny speech/text with Mimi code lanes | ASR / TTS / hybrid | 0.02 |
+| `shangeth/ljspeech-mimi-codes` | LJSpeech speech/text with Mimi code lanes | ASR / TTS / hybrid | 0.01 |
 
 ### Supervision Tasks
 
@@ -271,7 +269,7 @@ The reported CE is a weighted multimodal objective, not a plain text perplexity.
 | :---: | :---: |
 | ![Train Loss](assets/train_loss.png) | ![Validation Loss](assets/val_loss.png) |
 
-Previous 586M-run eval retained for comparison, completed at step 1,000,000:
+Archived 586M-run eval retained for comparison, completed at step 1,000,000:
 
 | Metric | Value |
 | :--- | ---: |
@@ -315,32 +313,15 @@ Previous 586M-run eval retained for comparison, completed at step 1,000,000:
 
 Validation metrics are teacher-forced measurements on held-out dataset pairs. Free-running probes are not used as evaluation results.
 
-## Output Examples
-
-These examples are fixed held-out dataset rows from the previous 586M run at step 1,000,000. The source ids are stored in [`assets/eval_samples.json`](assets/eval_samples.json).
-
-| ID | Dataset row | Input | Expected | Model output |
-| :--- | :--- | :--- | :--- | :--- |
-| `text_dolly_000032` | `source_idx=4,row_idx=32` | `what is the trans tahoe relay?` | Race across Lake Tahoe, run as a six-person relay. | `tahoe is a street...` |
-| `text_dolly_000033` | `source_idx=4,row_idx=33` | `how has the video gaming industry evolved over the years ?` | Summary of PC, console, mobile, streaming, and e-sports growth. | empty response |
-
-| ID | Image | Question | Expected | Model output |
-| :--- | :---: | :--- | :--- | :--- |
-| `image_vqav2_000000` | <img src="assets/eval_image_vqav2_000000_160px.png" width="160" alt="VQAv2 row 0 processed at 160px" /> | `where is he looking?` | `down` | `middle` |
-| `image_vqav2_000001` | <img src="assets/eval_image_vqav2_000001_160px.png" width="160" alt="VQAv2 row 1 processed at 160px" /> | `what are the people in the background doing?` | `watching` | empty response |
-
-| ID | Input | Target | Rendered output |
-| :--- | :--- | :--- | :---: |
-| `audio_libritts_000004` | `say this aloud: what do you make of it, gryce?"` | 192 Mimi target tokens | <audio controls src="assets/eval_audio_libritts_000004.wav"></audio><br/>[WAV](assets/eval_audio_libritts_000004.wav) |
-| `audio_librispeech_000007` | `say this aloud: painting he tells us is of a different quality...` | 928 Mimi target tokens | <audio controls src="assets/eval_audio_librispeech_000007.wav"></audio><br/>[WAV](assets/eval_audio_librispeech_000007.wav) |
-
-### Interpretation
+## Validation Artifacts
 
 - Session management: `[SESSION]` initializes the memory matrix for each interaction.
 - Listening: the model targets `[LISTEN]` during user input to update the matrix without output.
 - Turn-taking: `[USER_END]` triggers the switch from writing/listening to response mode.
 - Response mode: `[MODEL]` is followed by an ordered output segment such as `[TEXT_OUTPUT]` or `[AUDIO_OUTPUT]`. Image rows are evaluated as visual input followed by text output.
 - Current limitation: control tokens are learning faster than high-quality long-form generation.
+
+Fixed validation rows and archived generated samples are stored under `assets/` for inspection. They are diagnostic artifacts, not product demos.
 
 ## Setup and Execution
 
@@ -437,7 +418,7 @@ The architecture is suited for environments where traditional Transformer infere
 - Real-time streaming requiring low-latency response times.
 - Edge deployment on hardware with constrained memory.
 - Full-duplex systems involving simultaneous input and generation.
-- Persistent agents maintaining state across extended sessions.
+- Persistent streaming applications maintaining state across extended sessions.
 
 ### Training Methodology
 The model uses stateful truncated Backpropagation Through Time (BPTT) to evolve the memory matrix M across sequence chunks. This lets the model learn streaming dependencies while preserving a fixed-size recurrent state. Stability and recall quality are active research questions because the matrix is a compressed, lossy memory rather than a lossless transcript.

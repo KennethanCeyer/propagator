@@ -1,13 +1,19 @@
 .venv/
 __pycache__/
 *.pyc
-outputs/
-logs/
 helpers/
 .env
 .ipynb_checkpoints/
 .DS_Store
+
+# Runtime artifacts
+outputs/
+logs/
+*.log
+*.pid
+*.latest.log
+nohup.out
+
+# Large generated artifacts
 *.bin
 *.json.meta
-*.log
-nohup.out

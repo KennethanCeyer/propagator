@@ -1,7 +1,7 @@
 [
   {
     "name": "json",
-    "data_files": "data/propagator_posttrain_cleaned.jsonl",
+    "data_files": "data/datasets/propagator_posttrain_cleaned.jsonl",
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",
@@ -11,7 +11,7 @@
   },
   {
     "name": "json",
-    "data_files": "data/propagator_instruction_balanced_seed.jsonl",
+    "data_files": "data/datasets/propagator_instruction_balanced_seed.jsonl",
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",
@@ -29,7 +29,7 @@
   },
   {
     "name": "json",
-    "data_files": "data/propagator_identity.jsonl",
+    "data_files": "data/datasets/propagator_identity.jsonl",
     "split": "train",
     "validation_split": "train",
     "mode": "duplex_chat",

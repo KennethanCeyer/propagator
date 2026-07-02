@@ -229,10 +229,9 @@ def main() -> None:
     args = parser.parse_args()
 
     paths = args.paths or [
-        REPO_ROOT / "data" / "propagator_instruction_balanced_seed.jsonl",
-        REPO_ROOT / "data" / "propagator_image_recognition_seed.jsonl",
-        REPO_ROOT / "data" / "propagator_posttrain_10k.jsonl",
-        REPO_ROOT / "data" / "propagator_identity.jsonl",
+        REPO_ROOT / "data" / "datasets" / "propagator_instruction_balanced_seed.jsonl",
+        REPO_ROOT / "data" / "datasets" / "propagator_posttrain_cleaned.jsonl",
+        REPO_ROOT / "data" / "datasets" / "propagator_identity.jsonl",
     ]
     failed = False
     resolved = [path if path.is_absolute() else REPO_ROOT / path for path in paths]

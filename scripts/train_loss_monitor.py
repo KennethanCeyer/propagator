@@ -13,7 +13,7 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_LINK = PROJECT_ROOT / "logs" / "train.latest.log"
-OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "propagator-multimodal"
+OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "propagator-multimodal_1b"
 METRICS_PATH = OUTPUT_ROOT / "train_metrics.jsonl"
 PLOT_PATH = OUTPUT_ROOT / "train_loss.png"
 LINE_RE = re.compile(

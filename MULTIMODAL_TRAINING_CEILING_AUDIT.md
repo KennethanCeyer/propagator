@@ -9,13 +9,13 @@ This audit treats Propagator as a stateful recurrent matrix-memory multimodal mo
 Implementation status:
 
 - Added `data/regression/sample_05_format_following.jsonl`.
-- Added `data/propagator_instruction_balanced_seed.jsonl`.
-- Added `data/propagator_dataset_mix_balanced_v2.json`.
+- Added `data/datasets/propagator_instruction_balanced_seed.jsonl`.
+- Added `data/mixes/propagator_dataset_mix.json`.
 - Added `scripts/audit_prop_regressions.py` for deterministic protocol/mask checks and lightweight data/cache imbalance reporting.
 - Added recognition-only `[IMAGE_IN]` as an explicit special protocol token in `train.py`.
 - The script uses the real `train.py` protocol builder through the repository virtualenv and does not run training.
 - Changed `scripts/train.sh` so future launches default to `VALIDATION_CONTROL_BATCHES=8` instead of `0`.
-- Changed `scripts/train.sh` so regular training defaults to `data/propagator_dataset_mix_balanced_v2.json` instead of the old imbalanced mix, unless `DATASET_MIX_FILE` is explicitly overridden.
+- Changed `scripts/train.sh` so regular training defaults to `data/mixes/propagator_dataset_mix.json`, unless `DATASET_MIX_FILE` is explicitly overridden.
 - Changed early stopping in `train.py` from weighted validation CE to a Propagator-specific composite validation score.
 
 Local verification:
@@ -24,7 +24,7 @@ Local verification:
 ./.venv/bin/python scripts/audit_prop_regressions.py --protocol-only
 ./.venv/bin/python scripts/audit_prop_regressions.py
 ./.venv/bin/python -m py_compile scripts/audit_prop_regressions.py
-python -m json.tool data/propagator_dataset_mix_balanced_v2.json >/dev/null
+python -m json.tool data/mixes/propagator_dataset_mix.json >/dev/null
 bash -n scripts/train.sh
 ```
 
@@ -41,10 +41,10 @@ Observed result:
 - Current validation metrics audit: `text_task_acc=0.3533`, `asr_task_acc=0.4599`, `tts_task_acc=0.3709`, `duplex_task_acc=NaN`, `audio_all_codebook_frame_exact_acc=0.0`.
 - Current validation composite audit: `validation_composite_score=0.4819`, `validation_protocol_score=0.8203`, `validation_text_score=0.3588`, `validation_speech_score=0.3965`, `validation_audio_aux_score=0.0782`, `validation_duplex_score=0.0`, `validation_coverage_score=1.0`.
 - Current data/cache audit warnings: posttrain contains 5.0% name-question rows and 5.0% repeated code-word rows; train cache is 74.9% plain text; validation cache is 94.8% plain text.
-- Balanced v2 mix audit: total configured weight 1.0, 38.0% duplex chat, 8.0% Dolly instruction, 9.0% plain text, 36.0% audio ASR/TTS sources, 9.0% EchoX hybrid. Identity configured share is 1.0%; `sample_05_format_following` fixture share is 9.0%.
-- Balanced v2 local-tokenize dry-run: `propagator_instruction_balanced_seed.jsonl`, `sample_05_format_following.jsonl`, and `propagator_identity.jsonl` all pass `tokenize_duplex` on checked rows. The old `propagator_posttrain_10k.jsonl` is excluded from balanced v2 because it is repetitive and contains raw modality markers in assistant text.
+- Balanced mix audit: raw configured weight 0.96 and normalized sampler shares of 25.0% duplex chat, 8.3% Dolly instruction, 11.5% plain text, 16.7% VQAv2 image recognition, and 38.5% Mimi-code speech/text sources. Identity configured share is 2.1% after normalization.
+- Balanced local-tokenize dry-run: `propagator_instruction_balanced_seed.jsonl`, `sample_05_format_following.jsonl`, and `propagator_identity.jsonl` all pass `tokenize_duplex` on checked rows. The old generated post-training file is excluded because it is repetitive and contains raw modality markers in assistant text.
 - `scripts/train.sh` passes syntax check.
-- Regular `scripts/train.sh` launches now default to the balanced v2 mix; posttrain mode can still use its own posttrain mix.
+- Regular `scripts/train.sh` launches now default to the balanced mix; posttrain mode can still use its own posttrain mix.
 - Early stopping now maximizes `validation_composite_score`; `val_loss` is still recorded and plotted, but it is not the sole stop criterion.
 
 ## 0. Current run status
@@ -73,7 +73,7 @@ Highest-confidence issues:
 | --- | --- | --- |
 | P0 | Validation and early stopping are not aligned with required behavior. | Validation uses only 16 batches and `validation_control_batches=0`; format following, memory recall, hybrid dialogue, and image grounding are not part of the stop criterion. The run stopped at 300k before the intended 1.158M steps. |
 | P0 | Active dataset mix is dominated by plain text continuation. | Train cache: FineWeb 56.66%, Wikipedia 18.21%. Validation cache: FineWeb 71.72%, Wikipedia 23.05%. This trains continuation more than instruction-following memory. |
-| P0 | Strict format following is underrepresented and repetitive. | `data/propagator_posttrain_10k.jsonl` contains 500 `What is your name?` rows and 500 repeated "Repeat only the code word" rows. It does not provide enough diverse constrained-output supervision. |
+| P0 | Strict format following is underrepresented and repetitive. | The old generated post-training file contained 500 `What is your name?` rows and 500 repeated "Repeat only the code word" rows. It did not provide enough diverse constrained-output supervision. |
 | P0 | `sample_05_format_following` shows memory/semantic retrieval failure, not only a protocol failure. | The model emits `[TEXT_OUT]` correctly, then generates identity and unrelated repetitive text instead of one word. |
 | P1 | Matrix-memory learning is not directly measured. | No logged diagnostics for memory norm, eta/forget distribution, read/write cosine, reset counts, state leakage, or chunk-boundary recall. |
 | P1 | State reset depends on external sampler reset masks, not the `[SESSION]` token itself. | Code resets recurrent memory through `reset_mask`; `[SESSION]` is a learned protocol token but not an intrinsic hard reset. This is acceptable only if every training/eval/runtime path reliably resets state. |
@@ -324,7 +324,7 @@ The validation split is especially damaging: it tells early stopping that plain 
 
 ### 6.2 Repetitive sample problem
 
-`data/propagator_posttrain_10k.jsonl` contains:
+The old generated post-training file contained:
 
 | Pattern | Count |
 | --- | ---: |
@@ -783,7 +783,7 @@ Prioritized:
 
 1. Validation set construction: active validation is overwhelmingly plain text and has no control validation batches.
 2. Early stopping: stopping criterion ignores format following, memory recall, audio quality, and multimodal grounding.
-3. Dataset mix source identity: active run config differs from `data/propagator_dataset_mix.json`; make the launched mix explicit and archived.
+3. Dataset mix source identity: active run config differs from `data/mixes/propagator_dataset_mix.json`; make the launched mix explicit and archived.
 4. Posttrain generation: repeated identity and code-word rows cause shallow memorization and identity intrusion.
 5. Reset mask discipline: `[SESSION]` is not a hard reset; add explicit state-leak tests.
 6. Chunk-boundary recall: test whether instructions before a boundary affect answer after the boundary.
@@ -875,12 +875,12 @@ scripts/train.sh
 To override it explicitly:
 
 ```bash
-DATASET_MIX_FILE=data/propagator_dataset_mix.json scripts/train.sh
+DATASET_MIX_FILE=data/mixes/propagator_dataset_mix.json scripts/train.sh
 ```
 
 This does not fix the already-trained checkpoint. It prevents the same failure pattern from being invisible in future runs and gives the next run a better candidate mixture.
 
-The old `data/propagator_posttrain_10k.jsonl` remains in the repository for reference, but balanced v2 no longer samples it. The audit script still reports its repetition because it explains the existing checkpoint behavior.
+The old generated post-training file has been removed from the repository, and the current mix samples `data/datasets/propagator_posttrain_cleaned.jsonl` instead.
 
 Remaining required work:
 

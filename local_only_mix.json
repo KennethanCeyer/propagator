@@ -1,1 +1,0 @@
-[{"name":"json","data_files":"data/propagator_identity.jsonl","split":"train","validation_split":"train","mode":"duplex_chat","streaming":false,"repeat":1,"weight":1.0}]
