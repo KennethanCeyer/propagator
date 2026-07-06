@@ -4,7 +4,7 @@ set -Eeuo pipefail
 MODE="${1:-once}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/disks/propagator-cache/outputs/propagator-multimodal_1b}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/propagator-multimodal_1b}"
 GCS_BASE="${GCS_BASE:-${GCS_BACKUP_DIR:-gs://propagator-gde-project-aicloud/propagator-duplex}}"
 INTERVAL_SECONDS="${GCS_SYNC_INTERVAL_SECONDS:-21600}"
 CHECKPOINT_POLL_SECONDS="${GCS_CHECKPOINT_POLL_SECONDS:-300}"

@@ -1,8 +1,10 @@
 #!/bin/bash
-LOG_FILE="/mnt/disks/propagator-cache/propagator/logs/memory_monitor.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+LOG_FILE="${LOG_FILE:-$PROJECT_ROOT/logs/memory_monitor.log}"
 echo "=== Memory Monitor Started at $(date) ===" > "$LOG_FILE"
 
-PID=$(cat /mnt/disks/propagator-cache/propagator/logs/train.pid 2>/dev/null)
+PID=$(cat "$PROJECT_ROOT/logs/train.pid" 2>/dev/null)
 if [ -z "$PID" ]; then
     PID=$(pgrep -f "train.py" | head -n 1)
 fi

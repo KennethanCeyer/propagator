@@ -17,6 +17,7 @@ cd "$PROJECT_ROOT"
 declare -A USER_ENV_OVERRIDES=()
 for key in \
     MODEL_PRESET OUTPUT_ROOT CACHE_ROOT DATASET_MIX_FILE DATASET_MIX FORCE_DATASET_MIX_FILE \
+    PROPAGATOR_DISK_ROOT HF_HOME HF_DATASETS_CACHE TRANSFORMERS_CACHE TMPDIR ECHOX_RAW_CACHE_DIR \
     MAX_STEPS EPOCHS GCS_BACKUP_DIR TRAIN_UNROLL_LEN \
     MAX_TRAIN_CHUNKS MAX_VAL_CHUNKS MAX_TRAIN_ROWS MAX_VAL_ROWS DATA_PACK_COUNT DATA_PACK_INDEX \
     MAX_AUDIO_SECONDS MAX_AUDIO_TOKENS_PER_ROW \
@@ -198,7 +199,37 @@ fi
 if [[ ! ${USER_ENV_OVERRIDES[DATASET_MIX]+x} || "${FORCE_DATASET_MIX_FILE:-0}" =~ ^(1|true|yes|on)$ ]]; then
     unset DATASET_MIX
 fi
-PROPAGATOR_DISK_ROOT="${PROPAGATOR_DISK_ROOT:-/mnt/disks/propagator-cache}"
+if [[ -z "${PROPAGATOR_DISK_ROOT:-}" ]]; then
+    if [[ -d /mnt/data && -w /mnt/data ]]; then
+        PROPAGATOR_DISK_ROOT="/mnt/data"
+    elif [[ -d /mnt/disks/propagator-cache && -w /mnt/disks/propagator-cache ]]; then
+        PROPAGATOR_DISK_ROOT="/mnt/disks/propagator-cache"
+    else
+        PROPAGATOR_DISK_ROOT=""
+    fi
+fi
+
+ensure_legacy_disk_alias() {
+    local legacy="/mnt/disks/propagator-cache"
+    local target="$1"
+    [[ -n "$target" && "$target" == "/mnt/data" ]] || return 0
+    if [[ -e "$legacy" || -L "$legacy" ]]; then
+        return 0
+    fi
+    if [[ -w /mnt ]]; then
+        mkdir -p /mnt/disks
+        ln -sfn "$target" "$legacy"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        sudo -n mkdir -p /mnt/disks
+        sudo -n ln -sfn "$target" "$legacy"
+    fi
+    if [[ ! -e "$legacy" && ! -L "$legacy" ]]; then
+        echo "Warning: could not create $legacy -> $target; old Hugging Face cache rows may contain stale absolute paths." >&2
+    fi
+}
+
+ensure_legacy_disk_alias "$PROPAGATOR_DISK_ROOT"
+
 if [[ -z "${CACHE_ROOT:-}" && -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
     CACHE_ROOT="$PROPAGATOR_DISK_ROOT/cache"
 elif [[ -z "${CACHE_ROOT:-}" && -d /dev/shm && -w /dev/shm ]]; then
@@ -216,10 +247,6 @@ if [[ -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
     mkdir -p "$CACHE_ROOT" "$HF_DATASETS_CACHE" "$TRANSFORMERS_CACHE" "$TMPDIR"
 fi
 DEFAULT_OUTPUT_ROOT="outputs/propagator-multimodal_1b"
-if [[ -d "$PROPAGATOR_DISK_ROOT" && -w "$PROPAGATOR_DISK_ROOT" ]]; then
-    DEFAULT_OUTPUT_ROOT="$PROPAGATOR_DISK_ROOT/outputs/propagator-multimodal_1b"
-    mkdir -p "$(dirname "$DEFAULT_OUTPUT_ROOT")"
-fi
 EFFECTIVE_OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT_ROOT}"
 if [[ "${EFFECTIVE_OUTPUT_ROOT}" == *"_1b"* && "${MODEL_PRESET,,}" != "full" ]]; then
     echo "Refusing to launch non-full MODEL_PRESET=$MODEL_PRESET into 1B output root: $EFFECTIVE_OUTPUT_ROOT" >&2

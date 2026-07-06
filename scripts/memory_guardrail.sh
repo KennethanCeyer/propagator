@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-/mnt/disks/propagator-cache/propagator}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PID_FILE="${PID_FILE:-$PROJECT_ROOT/logs/train.pid}"
 LOG_FILE="${LOG_FILE:-$PROJECT_ROOT/logs/memory_guardrail.log}"
 WARN_PCT="${WARN_PCT:-75}"
