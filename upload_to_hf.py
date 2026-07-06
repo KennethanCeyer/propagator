@@ -14,9 +14,10 @@ from huggingface_hub import HfApi, create_repo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_CACHE_DIR = Path("/mnt/disks/propagator-cache/cache")
-CACHE_DIR = Path(os.environ.get("PROPAGATOR_CACHE_DIR", DEFAULT_CACHE_DIR))
-TMP_DIR = Path(os.environ.get("HF_UPLOAD_TMP_DIR", "/mnt/disks/propagator-cache/hf_upload_tmp"))
+DEFAULT_DISK_ROOT = Path(os.environ.get("PROPAGATOR_DISK_ROOT", "/mnt/data"))
+DEFAULT_CACHE_DIR = DEFAULT_DISK_ROOT / "cache"
+CACHE_DIR = Path(os.environ.get("PROPAGATOR_CACHE_DIR") or os.environ.get("CACHE_ROOT", DEFAULT_CACHE_DIR))
+TMP_DIR = Path(os.environ.get("HF_UPLOAD_TMP_DIR", str(DEFAULT_DISK_ROOT / "hf_upload_tmp")))
 SHARD_BYTES = int(os.environ.get("HF_UPLOAD_SHARD_BYTES", str(16 * 1024**3)))
 COPY_BUFFER_BYTES = int(os.environ.get("HF_UPLOAD_COPY_BUFFER_BYTES", str(64 * 1024**2)))
 PUBLIC_DATASET = os.environ.get("HF_DATASET_PUBLIC", "1").lower() not in {"0", "false", "no", "off"}

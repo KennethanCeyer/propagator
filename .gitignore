@@ -7,6 +7,9 @@ helpers/
 .DS_Store
 
 # Runtime artifacts
+cache/
+hf/
+tmp/
 outputs/
 logs/
 *.log
